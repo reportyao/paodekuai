@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#0b3a20">
+<title>跑得快 · 两人对战</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🂣</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ======== 大厅 ======== -->
+<div id="lobby" class="screen">
+  <div class="lobby-card">
+    <div class="logo">🂣 跑得快</div>
+    <div class="slogan">两人对战 · 48张牌 · 黑桃3先出 · 有牌必打</div>
+
+    <div class="field">
+      <label>选择模式</label>
+      <div class="modes">
+        <div class="mode" data-mode="ai">
+          <div class="mode-title">🤖 人机对战</div>
+          <div class="mode-desc">你 VS AI<br>你拥有 AI 出牌提示</div>
+        </div>
+        <div class="mode" data-mode="hotseat">
+          <div class="mode-title">👥 双人热座</div>
+          <div class="mode-desc">玩家一（有AI提示）<br>VS 玩家二（无提示）</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="field">
+      <label>对局设置</label>
+      <div class="opt-grid">
+        <label class="opt"><input type="checkbox" id="opt-sanzhang"> 三张不可接<small>最后一手三张/三带一不能管三带二</small></label>
+        <label class="opt"><input type="checkbox" id="opt-nobomb" checked> 炸弹不可拆<small>炸弹不能拆开打别的牌型</small></label>
+        <label class="opt"><input type="checkbox" id="opt-red10"> 红桃十翻倍<small>拿到♥10的玩家输赢×2</small></label>
+        <label class="opt"><input type="checkbox" id="opt-four3"> 四带三<small>可以出四张带任意三张</small></label>
+      </div>
+      <div class="round-sel">
+        <span>局数：</span>
+        <select id="sel-rounds">
+          <option value="5">5 局</option>
+          <option value="10" selected>10 局（默认）</option>
+          <option value="15">15 局</option>
+          <option value="20">20 局</option>
+        </select>
+        <span class="round-tip">底分 1分/张 · 炸弹 10分/颗</span>
+      </div>
+    </div>
+
+    <button id="btn-start" class="btn primary big">开始游戏</button>
+
+    <details class="rules">
+      <summary>📜 玩法规则（两人版）</summary>
+      <div class="rules-body">
+        <p>· 一副牌 48 张：拿走大小王、三个2（♥2 ♣2 ♦2）和黑桃A，<b>黑桃2</b>保留、为最大单张。每人发 24 张。</p>
+        <p>· 首局<b>持有黑桃3</b>的一方先出；之后每局由上局赢家先出。</p>
+        <p>· 点数大小：<b>2 &gt; A &gt; K &gt; Q &gt; J &gt; 10 &gt; 9 &gt; … &gt; 3</b>，不分花色；<b>2 不能出现在顺子中</b>。</p>
+        <p>· 牌型：单张 / 对子 / 连对(2对及以上) / 顺子(5~12张) / 三带二(三张+2张任意牌) / 飞机(2副以上连三张，每副带2张) / 炸弹(4张同点，3333最小、KKKK最大——2只有1张、A只有3张，都凑不成炸弹)。</p>
+        <p>· <b>三个A（AAA）只是三张牌，不算炸弹</b>，也不能当炸弹压牌。</p>
+        <p>· 纯三张、三带一只能在<b>最后一手</b>打出；同牌型比大小，炸弹压一切。</p>
+        <p>· <b>有牌必打</b>：能管上时不能不出。</p>
+        <p>· <b>报单</b>：只剩1张牌时要报单；对方出<b>单张</b>时必须出手中最大的单张（防放水）。</p>
+        <p>· 计分：输家按剩余张数×底分(1)扣分，<b>剩1张不计分</b>；关门（输家一张未出）失分翻倍；每颗未被压掉的炸弹向对方收10分；红桃十翻倍（可选）。</p>
+      </div>
+    </details>
+  </div>
+</div>
+
+<!-- ======== 牌桌 ======== -->
+<div id="game" class="screen hidden">
+  <div class="table">
+    <div class="topbar">
+      <div class="tb-left">
+        <span class="chip gold">第 <b id="g-round">1</b>/<b id="g-rounds">10</b> 局</span>
+        <span class="chip" id="g-mode"></span>
+      </div>
+      <div class="tb-right">
+        <span class="chip score" id="g-score"></span>
+        <button id="btn-score" class="btn ghost small">计分</button>
+        <button id="btn-rules" class="btn ghost small">规则</button>
+        <button id="btn-quit" class="btn ghost small">退出</button>
+      </div>
+    </div>
+
+    <div class="board">
+      <!-- 对手 -->
+      <div class="seat pos-top" id="seat-opp">
+        <div class="seat-head">
+          <div class="avatar" id="opp-avatar">🤖</div>
+          <div class="s-info">
+            <div class="s-name" id="opp-name">电脑</div>
+            <div class="s-tags" id="opp-tags"></div>
+          </div>
+          <div class="s-cards">剩 <b id="opp-count">24</b> 张</div>
+        </div>
+        <div class="s-backs" id="opp-backs"></div>
+        <div class="s-bao hidden" id="opp-bao">⚠ 报单</div>
+      </div>
+
+      <!-- 中央出牌区 -->
+      <div class="playzone">
+        <div class="play-row opp-play">
+          <div class="play-label" id="opp-play-label"></div>
+          <div class="play-cards" id="opp-play-cards"></div>
+        </div>
+        <div class="center-msg" id="center-msg"></div>
+        <div class="play-row my-play">
+          <div class="play-label" id="my-play-label"></div>
+          <div class="play-cards" id="my-play-cards"></div>
+        </div>
+      </div>
+
+      <!-- 我的信息 -->
+      <div class="myzone">
+        <div class="myseat" id="my-seat">
+          <div class="avatar" id="my-avatar">🙂</div>
+          <div class="s-info">
+            <div class="s-name" id="my-name">我</div>
+            <div class="s-tags" id="my-tags"></div>
+          </div>
+          <div class="s-cards">剩 <b id="my-count">24</b> 张</div>
+          <div class="s-bao inline hidden" id="my-bao">⚠ 报单</div>
+        </div>
+      </div>
+
+      <!-- 手牌与操作 -->
+      <div class="hand-wrap">
+        <div class="hand" id="hand"></div>
+        <div class="ai-hint hidden" id="hint-bar">
+          <span id="hint-text"></span>
+          <button id="btn-adopt" class="btn primary small">采纳</button>
+        </div>
+        <div class="actions">
+          <span id="turn-tip" class="turn-tip"></span>
+          <button id="btn-hint" class="btn hint-btn2">💡 提示</button>
+          <button id="btn-pass" class="btn warn">不出</button>
+          <button id="btn-play" class="btn primary">出牌</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ======== 热座交接 ======== -->
+<div id="handover" class="modal hidden">
+  <div class="modal-card handover-card">
+    <div class="handover-icon" id="ho-icon">👤</div>
+    <div class="modal-title" id="ho-title">轮到 玩家一</div>
+    <div class="hint-modal-desc" id="ho-desc">请将设备交给对方，确认对方看不到你的手牌后再继续。</div>
+    <div class="modal-btns">
+      <button id="btn-handover-ok" class="btn primary big">我准备好了，看牌</button>
+    </div>
+  </div>
+</div>
+
+<!-- ======== 结算弹窗 ======== -->
+<div id="modal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-title" id="m-title"></div>
+    <div class="modal-list" id="m-list"></div>
+    <div class="modal-btns">
+      <button id="btn-next" class="btn primary big">下一局 →</button>
+      <button id="btn-rematch" class="btn primary big hidden">再来一场</button>
+      <button id="btn-back-lobby" class="btn ghost big hidden">回到大厅</button>
+    </div>
+  </div>
+</div>
+
+<!-- ======== 计分板 ======== -->
+<div id="score-modal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-title">📊 计分板</div>
+    <div class="score-table-wrap" id="score-table"></div>
+    <div class="modal-btns"><button id="btn-score-close" class="btn primary">关闭</button></div>
+  </div>
+</div>
+
+<!-- ======== 规则弹窗 ======== -->
+<div id="rules-modal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-title">玩法规则 · 两人跑得快</div>
+    <div class="modal-list rules-modal-body">
+      <p>· 一副牌 48 张：拿走大小王、三个2（♥2 ♣2 ♦2）和黑桃A，<b>黑桃2</b>保留、为最大单张。两人各发 24 张。</p>
+      <p>· 首局<b>黑桃3</b>持有者先出任意牌型；之后每局由上局赢家先出。轮到出牌时只能出比上家大的同牌型（或炸弹），<b>有牌必打</b>。</p>
+      <p>· 点数：<b>2 &gt; A &gt; K &gt; Q &gt; J &gt; 10 &gt; 9 &gt; 8 &gt; 7 &gt; 6 &gt; 5 &gt; 4 &gt; 3</b>，不分花色；<b>2 不能出现在顺子中</b>。</p>
+      <p>· 牌型：<b>单张</b>、<b>对子</b>、<b>连对</b>（连续2对及以上）、<b>顺子</b>（5~12张连续单张）、<b>三带二</b>（三同张+2张，可为一对或两单张）、<b>飞机</b>（2副及以上连三同张，每副带2张）、<b>炸弹</b>（4张同点，3333最小、KKKK最大）。</p>
+      <p>· <b>三个A（AAA）只是三张牌，不算炸弹</b>（A只有3张，不存在四个A的炸弹）。</p>
+      <p>· <b>纯三张 / 三带一</b>：只有在最后一手（正好出完）时才能打出；开启「三张不可接」后也不能管别人的三带二。</p>
+      <p>· <b>四带三</b>（可选）：四张带任意三张，只能被更大的四带三或炸弹压。</p>
+      <p>· <b>报单</b>：手牌只剩1张须报单；你的对手报单后，你出<b>单张</b>时必须出手中最大的单张，否则判放水（由你包赔）。</p>
+      <p>· <b>炸弹结算</b>：每颗炸弹向被炸方收 10 张底分；炸弹被更大的炸弹压掉则不计分。</p>
+      <p>· <b>计分</b>：输家 = 剩余张数 × 底分(1)，剩 1 张不计分；<b>关门</b>（赢家出完时输家一张未出）输家失分翻倍；开启「红桃十翻倍」时，♥10 持有者本局输赢×2。共 N 局，累计计分。</p>
+    </div>
+    <div class="modal-btns"><button id="btn-rules-close" class="btn primary">知道了</button></div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

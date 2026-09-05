@@ -1,0 +1,272 @@
+/* 跑得快 · 两人对战 - 界面样式（沿用掼蛋站设计语言） */
+* { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { height: 100%; }
+body {
+  font-family: "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  background: radial-gradient(ellipse at 50% 30%, #1d7a45 0%, #125531 45%, #072b17 100%);
+  color: #f2ecd8; overflow: hidden; user-select: none; touch-action: manipulation;
+}
+.hidden { display: none !important; }
+.screen { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+button { font-family: inherit; }
+
+/* ---------- 按钮 ---------- */
+.btn {
+  border: 1px solid rgba(255,255,255,.25); background: rgba(0,0,0,.35); color: #f2ecd8;
+  padding: 10px 22px; border-radius: 10px; font-size: 15px; cursor: pointer; transition: .15s;
+}
+.btn:hover:not(:disabled) { background: rgba(0,0,0,.5); transform: translateY(-1px); }
+.btn:active:not(:disabled) { transform: translateY(1px); }
+.btn:disabled { opacity: .35; cursor: not-allowed; }
+.btn.primary { background: linear-gradient(180deg, #f7d97e, #d9a93d); color: #3a2b05; border-color: #f7d97e; font-weight: 700; }
+.btn.primary:hover:not(:disabled) { background: linear-gradient(180deg, #ffe49a, #e6b94f); }
+.btn.warn { background: rgba(160, 60, 40, .55); border-color: rgba(255,150,120,.4); }
+.btn.ghost { background: rgba(0,0,0,.2); }
+.btn.big { font-size: 18px; padding: 13px 34px; width: 100%; }
+.btn.small { font-size: 12px; padding: 5px 12px; border-radius: 7px; }
+.btn.hint-btn2 { background: rgba(6, 40, 66, .8); border-color: rgba(120, 200, 255, .55); color: #bfe3ff; font-weight: 700; }
+.btn.hint-btn2:hover:not(:disabled) { background: rgba(10, 60, 96, .9); }
+
+/* ---------- 大厅 ---------- */
+.lobby-card {
+  width: min(480px, 94vw); max-height: 96vh; overflow-y: auto;
+  background: rgba(6, 32, 18, .88); border: 1px solid rgba(247, 217, 126, .35);
+  border-radius: 18px; padding: 26px 28px; box-shadow: 0 20px 60px rgba(0,0,0,.5);
+}
+.logo { font-size: 40px; font-weight: 900; text-align: center; letter-spacing: 10px; color: #f7d97e; text-shadow: 0 3px 12px rgba(0,0,0,.6); }
+.slogan { text-align: center; font-size: 13px; opacity: .75; margin: 8px 0 22px; letter-spacing: 1px; }
+.field { margin-bottom: 18px; }
+.field label { display: block; font-size: 13px; opacity: .8; margin-bottom: 7px; }
+.modes { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+.mode {
+  border: 2px solid rgba(255,255,255,.18); border-radius: 12px; padding: 13px 8px; text-align: center;
+  cursor: pointer; transition: .15s; background: rgba(0,0,0,.25); font-size: 13px; line-height: 1.6;
+}
+.mode:hover { border-color: rgba(247,217,126,.5); }
+.mode.active { border-color: #f7d97e; background: rgba(247,217,126,.12); box-shadow: 0 0 0 3px rgba(247,217,126,.15); }
+.mode-title { font-weight: 700; font-size: 14px; margin-bottom: 4px; }
+.mode-desc { opacity: .75; font-size: 12px; }
+.opt-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.opt {
+  border: 1px solid rgba(255,255,255,.18);
+  border-radius: 10px; padding: 9px 10px; background: rgba(0,0,0,.25); font-size: 13px; cursor: pointer; transition: .15s;
+}
+.opt:hover { border-color: rgba(247,217,126,.45); }
+.opt input { margin-right: 6px; transform: translateY(1px); }
+.opt small { display: block; margin: 3px 0 0 22px; opacity: .6; font-size: 10.5px; line-height: 1.4; }
+.round-sel { margin-top: 12px; display: flex; align-items: center; gap: 10px; font-size: 13px; flex-wrap: wrap; }
+.round-sel select {
+  padding: 8px 12px; border-radius: 9px; border: 1px solid rgba(255,255,255,.25);
+  background: rgba(0,0,0,.4); color: #f2ecd8; font-size: 14px; outline: none;
+}
+.round-tip { opacity: .55; font-size: 11.5px; }
+.rules { margin-top: 20px; font-size: 13px; }
+.rules summary { cursor: pointer; opacity: .8; }
+.rules-body { margin-top: 10px; opacity: .85; line-height: 1.9; background: rgba(0,0,0,.25); border-radius: 10px; padding: 12px 14px; }
+.rules b, .rules-modal-body b { color: #f7d97e; }
+.rules-body p, .rules-modal-body p { margin-bottom: 2px; }
+
+/* ---------- 牌桌 ---------- */
+#game { flex-direction: column; }
+.table { width: 100vw; height: 100vh; height: 100dvh; display: flex; flex-direction: column; }
+.topbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 7px 12px; background: rgba(0,0,0,.3); backdrop-filter: blur(4px); font-size: 13px; flex-wrap: wrap;
+}
+.tb-left, .tb-right { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.chip { background: rgba(0,0,0,.35); border: 1px solid rgba(255,255,255,.15); border-radius: 999px; padding: 4px 12px; white-space: nowrap; }
+.chip b { color: #f7d97e; }
+.chip.gold { color: #f7d97e; border-color: rgba(247,217,126,.4); }
+.chip.score { color: #fff; }
+.chip.score .pos { color: #7ef0a5; }
+.chip.score .neg { color: #ff9a8a; }
+.board { position: relative; flex: 1; min-height: 0; }
+
+/* 对手座位 */
+.seat {
+  position: absolute; top: 8px; left: 50%; transform: translateX(-50%);
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  background: rgba(0,0,0,.28); border: 2px solid transparent; border-radius: 14px; padding: 8px 14px;
+  min-width: 200px; transition: .2s; z-index: 5;
+}
+.seat.turn { border-color: #f7d97e; box-shadow: 0 0 18px rgba(247,217,126,.45); background: rgba(60,45,5,.35); }
+.seat-head { display: flex; align-items: center; gap: 9px; }
+.avatar {
+  width: 40px; height: 40px; border-radius: 50%; background: linear-gradient(135deg, #3f7d5a, #274d36);
+  display: flex; align-items: center; justify-content: center; font-size: 20px; border: 2px solid rgba(255,255,255,.35);
+  flex-shrink: 0;
+}
+.seat.turn .avatar, .myseat.turn .avatar { border-color: #f7d97e; }
+.s-info { display: flex; flex-direction: column; gap: 2px; align-items: flex-start; }
+.s-name { font-size: 14px; font-weight: 700; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.s-tags { display: flex; gap: 4px; flex-wrap: wrap; }
+.tag { font-size: 10px; border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
+.tag.ai { background: rgba(150,150,150,.35); }
+.tag.human { background: rgba(80,200,120,.5); font-weight: 700; }
+.tag.hint-on { background: rgba(90,170,235,.75); color: #04263e; font-weight: 700; }
+.tag.hint-off { background: rgba(120,120,120,.4); }
+.s-cards { font-size: 13px; opacity: .95; white-space: nowrap; }
+.s-cards b { color: #f7d97e; font-size: 17px; }
+.s-backs { display: flex; max-width: 210px; height: 14px; }
+.s-backs i {
+  width: 9px; height: 14px; border-radius: 2px; margin-left: -5px;
+  background: linear-gradient(135deg, #35618f, #1d3a5c); border: 1px solid rgba(255,255,255,.25);
+}
+.s-backs i:first-child { margin-left: 0; }
+.s-thinking { font-size: 11px; color: #f7d97e; animation: blink 1.2s infinite; }
+@keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+.s-bao {
+  font-size: 12px; font-weight: 800; color: #ff5b4a; background: rgba(0,0,0,.5);
+  border: 1px solid rgba(255,110,90,.7); border-radius: 999px; padding: 2px 12px;
+  animation: blink 1s infinite;
+}
+.s-bao.inline { animation: none; padding: 1px 8px; font-size: 11px; }
+
+/* 中央出牌区 */
+.playzone {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%,-52%);
+  width: min(560px, 92vw); display: flex; flex-direction: column; align-items: center; gap: 10px; z-index: 1;
+}
+.play-row { min-height: 78px; display: flex; flex-direction: column; align-items: center; gap: 5px; }
+.play-label { font-size: 12.5px; color: #ffe9ad; text-shadow: 0 1px 6px rgba(0,0,0,.7); text-align: center; line-height: 1.5; }
+.play-label .pass { color: #b9c9bb; letter-spacing: 2px; }
+.play-label .bomb { color: #ff8a5c; font-weight: 800; }
+.play-cards { display: flex; justify-content: center; min-height: 62px; }
+.play-cards:empty { min-height: 0; }
+.center-msg {
+  min-height: 24px; font-size: 15px; color: #ffe9ad; text-align: center;
+  text-shadow: 0 2px 8px rgba(0,0,0,.6); line-height: 1.5; max-width: 90vw;
+}
+.center-msg.warn { color: #ffb35c; }
+
+/* 我的信息：抬到手牌区上方，避免被牌盖住 */
+.myzone { position: absolute; left: 10px; bottom: 210px; z-index: 5; }
+.myseat {
+  display: flex; align-items: center; gap: 9px; background: rgba(0,0,0,.3); border-radius: 12px;
+  padding: 7px 12px; border: 2px solid transparent; transition: .2s;
+}
+.myseat.turn { border-color: #f7d97e; box-shadow: 0 0 16px rgba(247,217,126,.4); }
+
+/* 手牌与操作 */
+.hand-wrap {
+  position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%);
+  display: flex; flex-direction: column; align-items: center; gap: 7px; max-width: 100vw; width: 100%; z-index: 6;
+}
+.hand { display: flex; justify-content: center; align-items: flex-end; min-height: 96px; width: 100%; padding: 24px 6px 0; overflow: visible; }
+.hand .card { cursor: pointer; }
+.hand .card.sel { transform: translateY(-20px); box-shadow: 0 0 0 3px #f7d97e, 0 10px 20px rgba(0,0,0,.5); z-index: 2; }
+.hand .card.sugg { box-shadow: 0 0 0 3px #7db8ff, 0 8px 18px rgba(0,0,0,.5); }
+.actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: center; }
+.turn-tip { font-size: 12px; color: #ffd88e; opacity: .9; max-width: 40vw; text-align: right; line-height: 1.4; }
+.ai-hint {
+  display: flex; align-items: center; gap: 10px; padding: 6px 14px;
+  background: rgba(6, 40, 66, .88); border: 1px solid rgba(120, 200, 255, .55);
+  border-radius: 12px; font-size: 13.5px; box-shadow: 0 4px 14px rgba(0,0,0,.35); max-width: 94vw;
+}
+.ai-hint b { color: #8fd0ff; }
+.hint-cards { font-family: Georgia, serif; color: #ffe9ad; letter-spacing: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 46vw; }
+
+/* ---------- 扑克牌 ---------- */
+.card {
+  position: relative; width: 62px; height: 90px; border-radius: 8px; flex-shrink: 0;
+  background: linear-gradient(160deg, #ffffff 0%, #f1efe7 100%);
+  box-shadow: 0 3px 8px rgba(0,0,0,.45); color: #222; transition: transform .12s, box-shadow .12s;
+  font-family: Georgia, "Times New Roman", serif;
+}
+.card .cr { position: absolute; top: 4px; left: 6px; font-size: 17px; font-weight: 800; line-height: 1.02; text-align: center; }
+.card .cr .suit-sm { display: block; font-size: 13px; }
+.card .cs { position: absolute; bottom: 5px; right: 7px; font-size: 24px; opacity: .9; }
+.card.red { color: #c8102e; }
+/* 出牌区小牌 */
+.mini { width: 42px; height: 62px; border-radius: 5px; }
+.mini .cr { font-size: 12px; top: 2px; left: 4px; }
+.mini .cr .suit-sm { font-size: 9px; }
+.mini .cs { font-size: 15px; bottom: 3px; right: 4px; }
+.mini:last-child { margin-right: 0; }
+.play-cards .mini { margin-right: -10px; }
+
+/* ---------- 弹窗 ---------- */
+.modal { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; z-index: 50; backdrop-filter: blur(3px); }
+.modal-card { width: min(440px, 92vw); max-height: 90vh; overflow-y: auto; background: #10331f; border: 1px solid rgba(247,217,126,.5); border-radius: 16px; padding: 24px; box-shadow: 0 24px 70px rgba(0,0,0,.6); }
+.modal-title { text-align: center; font-size: 25px; font-weight: 900; color: #f7d97e; margin-bottom: 16px; letter-spacing: 2px; }
+.modal-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 18px; }
+.rules-modal-body { font-size: 13px; line-height: 1.85; opacity: .92; }
+.modal-btns { display: flex; flex-direction: column; gap: 10px; align-items: center; }
+
+/* 结算行 */
+.res-line {
+  display: flex; align-items: center; gap: 10px; background: rgba(0,0,0,.3);
+  border-radius: 10px; padding: 10px 14px; font-size: 14px; line-height: 1.5;
+}
+.res-line.hl { border: 1px solid rgba(247,217,126,.55); background: rgba(247,217,126,.08); }
+.res-line .k { opacity: .65; font-size: 12px; width: 74px; flex-shrink: 0; }
+.res-line .v { flex: 1; }
+.res-line .num { font-weight: 800; }
+.num.pos { color: #7ef0a5; }
+.num.neg { color: #ff9a8a; }
+.big-score { text-align: center; font-size: 15px; margin: 4px 0 10px; color: #ffe9ad; }
+.big-score b { font-size: 22px; color: #f7d97e; }
+
+/* 计分板 */
+.score-table-wrap { overflow-x: auto; margin-bottom: 16px; }
+.score-table { width: 100%; border-collapse: collapse; font-size: 12.5px; min-width: 420px; }
+.score-table th, .score-table td { padding: 7px 8px; text-align: center; border-bottom: 1px solid rgba(255,255,255,.12); white-space: nowrap; }
+.score-table th { color: #f7d97e; font-weight: 700; background: rgba(0,0,0,.25); position: sticky; top: 0; }
+.score-table td.pos { color: #7ef0a5; font-weight: 700; }
+.score-table td.neg { color: #ff9a8a; font-weight: 700; }
+.score-table tr.total td { border-top: 2px solid rgba(247,217,126,.5); color: #f7d97e; font-weight: 800; background: rgba(247,217,126,.06); }
+
+/* 热座交接 */
+.handover-card { text-align: center; }
+.handover-icon { font-size: 52px; margin-bottom: 6px; }
+.handover-card .modal-title { letter-spacing: 4px; }
+.hint-modal-desc { font-size: 13px; opacity: .85; text-align: center; line-height: 1.7; margin-bottom: 16px; }
+.hint-modal-desc b { color: #f7d97e; }
+
+/* ---------- Toast ---------- */
+.toast {
+  position: fixed; top: 16px; left: 50%; transform: translateX(-50%); z-index: 99;
+  background: rgba(20,10,5,.92); color: #ffd9a0; border: 1px solid rgba(255,180,90,.4);
+  padding: 10px 22px; border-radius: 10px; font-size: 14px; box-shadow: 0 8px 24px rgba(0,0,0,.5);
+  animation: fadein .2s; max-width: 90vw; text-align: center;
+}
+@keyframes fadein { from { opacity: 0; transform: translate(-50%,-8px); } to { opacity: 1; transform: translate(-50%,0); } }
+
+/* ---------- 响应式 ---------- */
+@media (max-width: 760px) {
+  .card { width: 50px; height: 74px; }
+  .card .cr { font-size: 14px; }
+  .card .cs { font-size: 19px; }
+  .hand { min-height: 84px; padding-top: 20px; }
+  .mini { width: 36px; height: 54px; }
+  .mini .cr { font-size: 11px; }
+  .mini .cs { font-size: 13px; }
+  .play-row { min-height: 66px; }
+  .play-cards { min-height: 54px; }
+  .myzone { left: 6px; bottom: 172px; }
+  .seat { min-width: 170px; padding: 6px 10px; }
+  .s-backs { max-width: 150px; }
+  .center-msg { font-size: 14px; }
+  .btn { padding: 9px 16px; font-size: 14px; }
+  .turn-tip { display: none; }
+  .opt-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 380px) {
+  .card { width: 44px; height: 66px; }
+  .card .cr { font-size: 12px; }
+  .card .cs { font-size: 16px; }
+  .mini { width: 32px; height: 48px; }
+  .hand { min-height: 78px; }
+  .s-name { max-width: 90px; font-size: 13px; }
+  .chip { padding: 3px 9px; font-size: 12px; }
+  .logo { font-size: 32px; letter-spacing: 7px; }
+  .actions .btn { padding: 9px 13px; font-size: 13px; }
+}
+@media (max-height: 620px) {
+  .hand { min-height: 74px; padding-top: 16px; }
+  .card { width: 44px; height: 64px; }
+  .play-row { min-height: 56px; }
+  .play-cards { min-height: 48px; }
+  .myzone { bottom: 140px; }
+  .seat { top: 4px; }
+}
