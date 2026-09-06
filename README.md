@@ -2,6 +2,9 @@
 
 两人跑得快的本地网页游戏，风格与 [掼蛋·在线对战](http://43.128.24.244/) 一致。纯前端实现（无后端逻辑），`server.py` 只负责静态托管。
 
+> **原创声明**：本项目为原创实现（代码/样式/逻辑手写），仅供个人本地学习研究。
+> 规则采用通用两人跑得快打法；与任何商业棋牌 App 的内部代码无关。
+
 ## 快速开始
 
 ```bash
@@ -46,3 +49,44 @@ python server.py          # 默认 8310 端口，可改：python server.py 8080
 ## 部署（可选）
 
 与掼蛋站相同套路：整目录上传服务器后用任意静态服务器（nginx alias / `python server.py`）托管即可。
+
+## 机器人模型接口（预留）
+
+AI 出牌走 `aiMove()`，默认内置贪心算法。已预留可插拔模型入口，后续接自定义模型时无需改动牌局代码：
+
+```js
+// 在控制台或自己的脚本里注册（同步返回或 Promise 均可）
+pdkRegisterAI(async (ctx) => {
+  // ctx = {
+  //   seat: 1,                  // AI 固定坐 1 号位
+  //   hand: [...],              // AI 当前手牌（副本）
+  //   oppCount: 17,             // 对手剩余张数
+  //   last: combo | null,       // 桌面上一手牌型（null = 自由出牌）
+  //   legal: [{cards, combo}],  // 全部合法候选（已过规则校验）
+  //   opts: {...},              // 本局规则开关
+  // }
+  // 返回：legal 中某个候选的 cards 数组；null/[] 表示不出（自由出牌时无效）
+  return ctx.legal[0]?.cards ?? null;
+});
+```
+
+安全约束：
+
+- 返回的牌按 **id 集合**与 `legal` 候选精确匹配，匹配不上（越权/幻觉出牌）自动回退内置 AI；
+- 模型抛异常同样回退内置 AI，牌局不中断；
+- 自由出牌时返回「不出」无效，回退内置 AI。
+
+## 代码结构（app.js 单文件分区块）
+
+| 区块 | 内容 |
+| --- | --- |
+| 状态 `S` | 局面单一数据源：手牌、回合、累计分、历史、开关 |
+| 基础工具 | `buildDeck`（48 张编码 `{i,r,s}`）、`shuffle`（crypto 均匀随机）、牌面 HTML |
+| 牌型分析 | `analyzeShape`：single/pair/triple/t1/t2/straight/pairseq/plane/planeBare/bomb/quad3 |
+| 比较 | `canBeat`：同型同长比 key；炸弹压一切；三张家族交叉规则 |
+| 上下文校验 | `comboContextOK`（最后一手限制）、`breaksBomb`（炸弹不可拆）、`violatesBaodan`（防放水） |
+| 候选生成 | `genLeads`（自由出牌）/ `genBeats`（跟牌）→ `legalPlays` 统一过滤去重 |
+| AI | `estimatePlays`（剩余手数）+ `scoreCandidate`（打分）+ `aiCandidates`；外挂入口 `pdkRegisterAI` |
+| 流程 | `startMatch → startRound → beginTurn → applyPlay/applyPass → endRound` |
+| 结算 | `settle`（底分/关门/炸弹/红桃十）→ 单局弹窗 / 总成绩表 / 计分板 |
+| 渲染 | `render`（座位/出牌区/手牌/按钮态），热座按当前座位视角渲染 |
