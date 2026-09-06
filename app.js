@@ -15,7 +15,8 @@ const S = {
   rounds: 10, roundNo: 0,
   total: [0, 0], history: [],
   names: ['我', '电脑'], avatars: ['🙂', '🤖'],
-  hands: [[], []], turn: 0,
+  hands: [[], []], kitty: [], turn: 0,
+  initialHands: [[], []], roundMoves: [],
   last: null,                                  // {combo, cards, by}
   shown: [null, null],                         // 各家最近动作（出牌/不出），用于展示
   bombs: [], playsMade: [0, 0], red10Holder: null,
@@ -23,6 +24,7 @@ const S = {
   awaiting: null,                              // 热座：等待确认看牌的座位
   selected: new Set(), hints: [], hintIdx: -1,
   bridgeMode: false, roundLeader: 0,           // AI 机器人桥接状态 / 本局先手
+  replay: null, replayArchive: [],
   aiTimer: null,
 };
 
@@ -49,7 +51,7 @@ function buildDeck() {
   d.push({ i: i++, r: 15, s: 0 });                                                    // 黑桃2，全场最大单张
   return d;                                                                           // 共48张
 }
-function sortHand(h) { h.sort((a, b) => a.r - b.r || a.s - b.s); return h; }
+function sortHand(h) { h.sort((a, b) => b.r - a.r || a.s - b.s); return h; }
 function removeCards(hand, cards) { const ids = new Set(cards.map(c => c.i)); return hand.filter(c => !ids.has(c.i)); }
 function cardText(c) { return SUITS[c.s] + RANK_NAME[c.r]; }
 function isRed(c) { return c.s === 1 || c.s === 3; }
@@ -419,9 +421,13 @@ function aiCandidates(seat) {
 
 /* ================= AI 机器人桥接（pdk_ai 深度模型, ai_bridge.py :8766） ================= */
 const AI_BRIDGE = 'http://127.0.0.1:8766';
-const bridge = { sid: null, ready: false, mode: '', actions: [], actPending: false, initHands: null, syncing: false };
+const bridge = { sid: null, ready: false, mode: '', actions: [], actPending: false, initHands: null, initKitty: null, syncing: false };
 
-function toBotCard(c) { return (c.r === 14 && c.s === 3) ? 44 : ((c.r - 3) << 2) | c.s; }
+function toBotCard(c) {
+  if (c.r === 14) return 44 + ([1, 2, 3].indexOf(c.s)); // pdk_ai的三张A槽位: 44,45,46
+  if (c.r === 15) return 48;                                  // 唯一的黑桃2 (pdk_ai 槽位 48)
+  return ((c.r - 3) << 2) | c.s;
+}
 function botRankToMy(idx) { return idx === 12 ? 15 : idx + 3; }   // bot点数0=3..11=A,12=2
 function rankSig(cards) { return cards.map(c => c.r).sort((a, b) => a - b).join(','); }
 function botRankSig(ids) { return ids.map(id => botRankToMy(id >> 2)).sort((a, b) => a - b).join(','); }
@@ -430,8 +436,13 @@ function matchLegalByRank(botIds, legal) {
   return legal.find(p => rankSig(p.cards) === sig) || null;   // 花色不影响规则，按点数匹配
 }
 function fromBotIds(ids, pool) {
-  const map = new Map(pool.map(c => [toBotCard(c), c]));
-  return ids.map(id => map.get(id)).filter(Boolean);
+  const byRank = new Map();
+  for (const c of pool) { const a = byRank.get(c.r) || []; a.push(c); byRank.set(c.r, a); }
+  const used = new Map();
+  return ids.map(id => {
+    const r = botRankToMy(id >> 2), arr = byRank.get(r) || [];
+    const n = used.get(r) || 0; used.set(r, n + 1); return arr[n] || null;
+  }).filter(Boolean);
 }
 function legalKey(cs) { return cs.map(c => c.i).sort((a, b) => a - b).join(','); }
 
@@ -460,12 +471,13 @@ async function bridgeNewRound() {
   const hands0 = S.hands[0].map(toBotCard), hands1 = S.hands[1].map(toBotCard);
   try {
     const r = await bridgeApi('/init', {
-      hands: [hands0, hands1],
+      hands: [hands0, hands1], kitty: S.kitty.map(toBotCard),
       leader: S.roundLeader, opts: bridgeOpts(),
     }, 8000);
     if (r.sid) {
       bridge.sid = r.sid; bridge.mode = r.mode || 'hybrid'; bridge.ready = true;
-      bridge.initHands = [hands0, hands1];               // 重连重放用初始发牌
+      bridge.initHands = [hands0, hands1];
+      bridge.initKitty = S.kitty.map(toBotCard);           // 重连重放用初始发牌+扣底
       setBridgeMode(true);
       // init 期间可能已有落子（AI先手竞态）：带着完整历史重放一次
       if (bridge.actions.length) await bridgeResync();
@@ -481,7 +493,8 @@ async function bridgeResync() {
   bridge.ready = false;
   try {
     const r = await bridgeApi('/init', {
-      hands: bridge.initHands, leader: S.roundLeader, opts: bridgeOpts(),
+      hands: bridge.initHands, kitty: bridge.initKitty || [],
+      leader: S.roundLeader, opts: bridgeOpts(),
       actions: bridge.actions,
     }, 12000);
     bridge.sid = r.sid || null; bridge.ready = !!r.sid;
@@ -599,7 +612,10 @@ function nextRound() {
 function startRound() {
   clearTimeout(S.aiTimer);
   const deck = shuffle(buildDeck());
-  S.hands = [sortHand(deck.slice(0, 24)), sortHand(deck.slice(24, 48))];
+  S.kitty = deck.slice(0, 16);
+  S.hands = [sortHand(deck.slice(16, 32)), sortHand(deck.slice(32, 48))];
+  S.initialHands = [S.hands[0].slice(), S.hands[1].slice()];
+  S.roundMoves = [];
   S.roundNo++;
   S.last = null; S.shown = [null, null];
   S.bombs = []; S.playsMade = [0, 0];
@@ -673,6 +689,7 @@ function applyPlay(seat, cards) {
     msg = '💣 炸弹！结算时收 ' + BOMB_SCORE + ' 分';
   }
   S.selected = new Set(); S.hints = []; S.hintIdx = -1;
+  S.roundMoves.push({ seat, cards: cards.map(c => c.i), combo: { ...combo }, ts: Date.now() });
   if (S.mode === 'ai') bridgeMirror(seat, cards);             // 镜像出牌（历史必记）
   if (hand.length === 1) toast('⚠ ' + S.names[seat] + ' 报单！只剩1张', 1800);
   if (msg) toast(msg, 1600);
@@ -685,10 +702,38 @@ function applyPass(seat) {
   S.shown[seat] = { pass: true };
   S.last = null;                                          // 对方获得自由出牌权
   S.selected = new Set(); S.hints = []; S.hintIdx = -1;
+  S.roundMoves.push({ seat, cards: [], combo: null, pass: true, ts: Date.now() });
   if (S.mode === 'ai') bridgeMirror(seat, []);                // 镜像过牌
   S.turn = 1 - seat;
   beginTurn();
 }
+
+function saveReplay(replay) {
+  try {
+    const key = 'pdk_replays_v1';
+    const all = JSON.parse(localStorage.getItem(key) || '[]');
+    all.unshift(replay);
+    localStorage.setItem(key, JSON.stringify(all.slice(0, 100)));
+  } catch (e) { console.warn('[Replay] 保存失败', e); }
+}
+function loadReplayArchive() {
+  try { S.replayArchive = JSON.parse(localStorage.getItem('pdk_replays_v1') || '[]'); }
+  catch { S.replayArchive = []; }
+}
+function downloadJSON(filename, value) {
+  const blob = new Blob([JSON.stringify(value, null, 2)], { type: 'application/json;charset=utf-8' });
+  const url = URL.createObjectURL(blob), a = document.createElement('a');
+  a.href = url; a.download = filename; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function showReplayHistory() {
+  loadReplayArchive();
+  const box = $('history-list');
+  if (!S.replayArchive.length) box.innerHTML = '<div class="hint-modal-desc">暂无已保存的对局记录。</div>';
+  else box.innerHTML = S.replayArchive.map((r, i) => `<div class="res-line"><span class="k">${new Date(r.ts).toLocaleString()}</span><span class="v">第${r.round}局 · ${r.game} · ${r.moves.length}手 · ${r.result.winner === 0 ? '玩家胜' : 'AI胜'} · ${r.result.delta.join(':')}</span><button class="btn ghost small" data-replay="${i}">下载</button></div>`).join('');
+  box.querySelectorAll('[data-replay]').forEach(b => b.addEventListener('click', () => downloadJSON('paodekuai-replay-' + (b.dataset.replay) + '.json', S.replayArchive[+b.dataset.replay])));
+  $('history-modal').classList.remove('hidden');
+}
+function exportAllReplays() { loadReplayArchive(); downloadJSON('paodekuai-replays.json', S.replayArchive); }
 
 /* ================= 结算 ================= */
 function settle(winner) {
@@ -715,6 +760,15 @@ function endRound(winner) {
   const r = settle(winner);
   const d0 = r.winner === 0 ? r.dW : r.dL;
   const d1 = r.winner === 0 ? r.dL : r.dW;
+  const replay = {
+    version: 1, game: 'paodekuai-2p', ts: new Date().toISOString(),
+    round: S.roundNo, mode: S.mode, opts: { ...S.opts },
+    initialHands: S.initialHands.map(h => h.map(c => c.i)),
+    kitty: S.kitty.map(c => c.i), firstPlayer: S.roundLeader,
+    moves: S.roundMoves.slice(), result: { winner: r.winner, loser: r.loser, rem: r.rem, shut: r.shut, base: r.base, bombs: [r.bw, r.bl], redTxt: r.redTxt, delta: [d0, d1], total: S.total.slice() },
+  };
+  S.replayArchive.push(replay);
+  saveReplay(replay);
   S.history.push({ no: S.roundNo, winner: r.winner, rem: r.rem, shut: r.shut, base: r.base, bw: r.bw, bl: r.bl, redTxt: r.redTxt, d0, d1 });
   render();
   showRoundModal(r);
@@ -825,7 +879,7 @@ function render() {
   $('opp-tags').innerHTML = oppTags.join('');
   $('seat-opp').classList.toggle('turn', S.turn === opp && S.phase === 'playing');
   $('opp-bao').classList.toggle('hidden', S.hands[opp].length !== 1);
-  $('opp-backs').innerHTML = '<i></i>'.repeat(Math.min(24, S.hands[opp].length));
+  $('opp-backs').innerHTML = '<i></i>'.repeat(Math.min(16, S.hands[opp].length));
   // 我方座位
   $('my-avatar').textContent = S.avatars[me];
   $('my-name').textContent = S.names[me];
@@ -909,7 +963,7 @@ function layoutHand() {
   if (step < 13) step = Math.max(11, step);
   cards.forEach((el, idx) => {
     el.style.marginLeft = idx === 0 ? '0' : (step - cw) + 'px';
-    el.style.zIndex = el.classList.contains('sel') ? 60 : idx + 1;   // 选中的牌浮在最上层
+    el.style.zIndex = idx + 1;   // 选中牌只弹起，不压到未选中牌前面
   });
 }
 // 视口尺寸变化（含移动端旋转）后重测一次，rAF 确保在样式应用后再测量
@@ -956,6 +1010,9 @@ function initLobby() {
   });
   document.querySelector('.mode[data-mode="ai"]').classList.add('active');
   $('btn-start').addEventListener('click', () => { startMatch(); });
+  $('btn-history-lobby').addEventListener('click', showReplayHistory);
+  $('btn-history-close').addEventListener('click', () => $('history-modal').classList.add('hidden'));
+  $('btn-export-all').addEventListener('click', exportAllReplays);
 }
 function humanPlay() {
   const me = myTurnHuman();
@@ -1007,6 +1064,7 @@ function quitToLobby() {
 
 /* ================= 初始化 ================= */
 function init() {
+  loadReplayArchive();
   initLobby();
   // AI 机器人回调：深度模型驱动 AI 座位；返回的牌必须命中我方合法候选，否则降级内置 AI
   pdkRegisterAI(async (ctx) => {

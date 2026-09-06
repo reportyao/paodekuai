@@ -51,11 +51,12 @@
     </div>
 
     <button id="btn-start" class="btn primary big">开始游戏</button>
+    <button id="btn-history-lobby" class="btn ghost big">📚 对局记录</button>
 
     <details class="rules">
       <summary>📜 玩法规则（两人版）</summary>
       <div class="rules-body">
-        <p>· 一副牌 48 张：拿走大小王、三个2（♥2 ♣2 ♦2）和黑桃A，<b>黑桃2</b>保留、为最大单张。每人发 24 张。</p>
+        <p>· 一副牌 48 张：拿走大小王、三个2（♥2 ♣2 ♦2）和黑桃A，<b>黑桃2</b>保留、为最大单张。随机抽走16张作为扣底，剩余32张两人各16张。</p>
         <p>· 首局<b>持有黑桃3</b>的一方先出；之后每局由上局赢家先出。</p>
         <p>· 点数大小：<b>2 &gt; A &gt; K &gt; Q &gt; J &gt; 10 &gt; 9 &gt; … &gt; 3</b>，不分花色；<b>2 不能出现在顺子中</b>。</p>
         <p>· 牌型：单张 / 对子 / 连对(2对及以上) / 顺子(5~12张) / 三带二(三张+2张任意牌) / 飞机(2副以上连三张，每副带2张) / 炸弹(4张同点，3333最小、KKKK最大——2只有1张、A只有3张，都凑不成炸弹)。</p>
@@ -94,7 +95,7 @@
             <div class="s-name" id="opp-name">电脑</div>
             <div class="s-tags" id="opp-tags"></div>
           </div>
-          <div class="s-cards">剩 <b id="opp-count">24</b> 张</div>
+          <div class="s-cards">剩 <b id="opp-count">16</b> 张</div>
         </div>
         <div class="s-backs" id="opp-backs"></div>
         <div class="s-bao hidden" id="opp-bao">⚠ 报单</div>
@@ -121,7 +122,7 @@
             <div class="s-name" id="my-name">我</div>
             <div class="s-tags" id="my-tags"></div>
           </div>
-          <div class="s-cards">剩 <b id="my-count">24</b> 张</div>
+          <div class="s-cards">剩 <b id="my-count">16</b> 张</div>
           <div class="s-bao inline hidden" id="my-bao">⚠ 报单</div>
         </div>
       </div>
@@ -178,12 +179,24 @@
   </div>
 </div>
 
+<!-- ======== 对局记录 ======== -->
+<div id="history-modal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-title">📚 对局记录</div>
+    <div id="history-list" class="modal-list"></div>
+    <div class="modal-btns">
+      <button id="btn-export-all" class="btn primary big">导出全部 JSON</button>
+      <button id="btn-history-close" class="btn ghost">关闭</button>
+    </div>
+  </div>
+</div>
+
 <!-- ======== 规则弹窗 ======== -->
 <div id="rules-modal" class="modal hidden">
   <div class="modal-card">
     <div class="modal-title">玩法规则 · 两人跑得快</div>
     <div class="modal-list rules-modal-body">
-      <p>· 一副牌 48 张：拿走大小王、三个2（♥2 ♣2 ♦2）和黑桃A，<b>黑桃2</b>保留、为最大单张。两人各发 24 张。</p>
+      <p>· 一副牌 48 张：拿走大小王、三个2（♥2 ♣2 ♦2）和黑桃A，<b>黑桃2</b>保留、为最大单张。随机抽走16张作为扣底，剩余32张两人各16张。</p>
       <p>· 首局<b>黑桃3</b>持有者先出任意牌型；之后每局由上局赢家先出。轮到出牌时只能出比上家大的同牌型（或炸弹），<b>有牌必打</b>。</p>
       <p>· 点数：<b>2 &gt; A &gt; K &gt; Q &gt; J &gt; 10 &gt; 9 &gt; 8 &gt; 7 &gt; 6 &gt; 5 &gt; 4 &gt; 3</b>，不分花色；<b>2 不能出现在顺子中</b>。</p>
       <p>· 牌型：<b>单张</b>、<b>对子</b>、<b>连对</b>（连续2对及以上）、<b>顺子</b>（5~12张连续单张）、<b>三带二</b>（三同张+2张，可为一对或两单张）、<b>飞机</b>（2副及以上连三同张，每副带2张）、<b>炸弹</b>（4张同点，3333最小、KKKK最大）。</p>

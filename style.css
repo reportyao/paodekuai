@@ -154,7 +154,7 @@ button { font-family: inherit; }
 }
 .hand { display: flex; justify-content: center; align-items: flex-end; min-height: 96px; width: 100%; padding: 24px 6px 0; overflow: visible; }
 .hand .card { cursor: pointer; }
-.hand .card.sel { transform: translateY(-20px); box-shadow: 0 0 0 3px #f7d97e, 0 10px 20px rgba(0,0,0,.5); z-index: 2; }
+.hand .card.sel { transform: translateY(-20px); box-shadow: 0 0 0 3px #f7d97e, 0 10px 20px rgba(0,0,0,.5); }
 .hand .card.sugg { box-shadow: 0 0 0 3px #7db8ff, 0 8px 18px rgba(0,0,0,.5); }
 .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: center; }
 .turn-tip { font-size: 12.5px; color: #ffe3ae; max-width: 40vw; text-align: right; line-height: 1.4; text-shadow: 0 1px 4px rgba(0,0,0,.8); }

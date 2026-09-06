@@ -51,6 +51,22 @@ from pdk.fast import PASS_CODE       # noqa: E402
 SESSIONS: dict = {}
 LOCK = threading.Lock()
 MAX_SESSIONS = 60
+REPLAY_DIR = Path(__file__).resolve().parent / "data" / "replays"
+REPLAY_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def save_replay(sid: str, s: Shadow):
+    if getattr(s, "saved", False) or not s.game.finished:
+        return
+    payload = {
+        "version": 1, "source": "ai_bridge", "sid": sid,
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "hands": s.init_payload["hands"], "kitty": s.init_payload.get("kitty", []),
+        "leader": s.init_payload["leader"], "opts": s.init_payload["opts"],
+        "codes": s.codes, "winner": s.game.winner, "scores": list(s.game.scores or (0, 0)),
+    }
+    (REPLAY_DIR / f"{sid}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    s.saved = True
 
 
 def build_cfg(o: dict) -> Config:
@@ -65,18 +81,19 @@ def build_cfg(o: dict) -> Config:
 class Shadow:
     """一局的镜像状态 + AI 内核。"""
 
-    def __init__(self, hands, leader, opts):
+    def __init__(self, hands, kitty, leader, opts):
         self.created = time.time()
         self.cfg = build_cfg(opts)
-        h0, h1 = sorted(hands[0]), sorted(hands[1])
-        assert sorted(h0 + h1) == sorted(bot_server.DECK), "两手牌必须恰好构成48张"
-        self.game = Game(cfg=self.cfg, first_player=leader, hands=[h0, h1], kitty=[])
+        h0, h1, k = sorted(hands[0]), sorted(hands[1]), sorted(kitty)
+        assert len(h0) == 16 and len(h1) == 16 and len(k) == 16, "需要两手16张和扣底16张"
+        assert sorted(h0 + h1 + k) == sorted(bot_server.DECK), "两手牌+扣底必须恰好构成48张"
+        self.game = Game(cfg=self.cfg, first_player=leader, hands=[h0, h1], kitty=k)
         self.cg = fast.CGame(counts_of_ids(h0), counts_of_ids(h1), leader, self.cfg)
         self.agent, self.mode = bot_server.build_ai(None)
         self.ai_seat = 1
         self.agent.new_game(self.ai_seat, list(self.game.cnt[self.ai_seat]))
-        self.codes = []                      # 已落子的动作码（suggest 重放用）
-        self.init_payload = {"hands": [h0, h1], "leader": leader, "opts": opts}
+        self.codes = []
+        self.init_payload = {"hands": [h0, h1], "kitty": k, "leader": leader, "opts": opts}
         self.bad = False                     # 影子失效 -> 通知网页版降级
         self.lock = threading.Lock()
 
@@ -117,9 +134,10 @@ def evict_old():
 
 def handle_init(p: dict):
     hands = p["hands"]
+    kitty = p.get("kitty", [])
     leader = int(p.get("leader", 0))
     opts = p.get("opts", {})
-    s = Shadow(hands, leader, opts)
+    s = Shadow(hands, kitty, leader, opts)
     sid = uuid.uuid4().hex[:12]
     with LOCK:
         SESSIONS[sid] = s
@@ -153,6 +171,7 @@ def do_action(sid: str, seat: int, cards):
             return False, "illegal move (not in legal set)"
         try:
             s._apply(code)
+            save_replay(sid, s)
         except Exception as e:                       # 引擎拒绝 -> 影子失效
             s.bad = True
             return False, f"engine rejected: {e}"
@@ -175,6 +194,7 @@ def do_act(sid: str):
             # （落子后手牌已移除，code_to_cards 会取不到牌）
             cards = list(fast.code_to_cards(code, s.game.hand_ids(s.ai_seat)))
             s._apply(code)
+            save_replay(sid, s)
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
@@ -190,7 +210,7 @@ def do_suggest(sid: str):
             return {"fallback": True}, 200
         init = s.init_payload
         codes = list(s.codes)
-    rep = Shadow(init["hands"], init["leader"], init["opts"])
+    rep = Shadow(init["hands"], init.get("kitty", []), init["leader"], init["opts"])
     with rep.lock:
         for code in codes:
             rep._apply(code)
