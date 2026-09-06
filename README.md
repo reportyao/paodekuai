@@ -15,6 +15,22 @@ python server.py          # 默认 8310 端口，可改：python server.py 8080
 或直接双击 `run.bat`，浏览器打开 <http://127.0.0.1:8310>。
 （也可以直接双击 index.html 用 file:// 打开，功能完全一致。）
 
+## 🤖 AI 机器人桥接（深度模型，可选）
+
+接入了 `pdk_ai` 项目的深度学习跑得快 AI（SolverAgent 残局精确求解 + PIMC + DMC 神经网络兜底）：
+
+```bash
+python ai_bridge.py       # 默认 :8766；--bot-root 指定 pdk_ai 项目路径
+```
+
+或双击 `start_all.bat` 一键启动网页 + 桥。效果：
+
+- **人机对战**：桥就绪时电脑由深度模型驱动（座位标签「AI·深度模型」）；桥未启动或中途退出，自动无缝降级为内置贪心 AI（「AI·内置」），对局不中断。
+- **出牌提示**：你的提示优先走深度模型（提示条标注「深度模型」），不可用时回退内置 AI。
+- 原理是「影子牌局」：每局把初始发牌/规则/先手同步给桥，双方落子实时镜像，桥内由 pdk_ai 引擎决策；任何失步自动带完整动作历史重建会话。
+- 牌 id 映射与 pdk_ai 全局约定一致（`id>>2` 点数、`id&3` 花色；网页版 ♦A 特判映射为 44）。
+- 桥接口（JSON，带 CORS）：`POST /init` 建影子局、`POST /action` 镜像落子、`POST /act` AI 决策、`POST /suggest` 玩家建议、`GET /legal`、`GET /health`。
+
 ## 模式
 
 | 模式 | 说明 |
@@ -87,6 +103,7 @@ pdkRegisterAI(async (ctx) => {
 | 上下文校验 | `comboContextOK`（最后一手限制）、`breaksBomb`（炸弹不可拆）、`violatesBaodan`（防放水） |
 | 候选生成 | `genLeads`（自由出牌）/ `genBeats`（跟牌）→ `legalPlays` 统一过滤去重 |
 | AI | `estimatePlays`（剩余手数）+ `scoreCandidate`（打分）+ `aiCandidates`；外挂入口 `pdkRegisterAI` |
+| AI 桥接 | `bridge*` 系列函数：影子牌局同步、`/act` 决策、`/suggest` 提示、失步重放、断桥降级 |
 | 流程 | `startMatch → startRound → beginTurn → applyPlay/applyPass → endRound` |
 | 结算 | `settle`（底分/关门/炸弹/红桃十）→ 单局弹窗 / 总成绩表 / 计分板 |
 | 渲染 | `render`（座位/出牌区/手牌/按钮态），热座按当前座位视角渲染 |

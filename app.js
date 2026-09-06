@@ -21,7 +21,8 @@ const S = {
   bombs: [], playsMade: [0, 0], red10Holder: null,
   lastWinner: null, phase: 'idle',             // 'idle'|'playing'|'roundEnd'|'matchEnd'
   awaiting: null,                              // 热座：等待确认看牌的座位
-  selected: new Set(), hints: [], hintIdx: 0,
+  selected: new Set(), hints: [], hintIdx: -1,
+  bridgeMode: false, roundLeader: 0,           // AI 机器人桥接状态 / 本局先手
   aiTimer: null,
 };
 
@@ -270,6 +271,9 @@ function genBeats(last, hand, opts) {
       const tri = m.get(r).slice(0, 3);
       const wA = pickWings(m, new Set([r]), 2, 'pairs'); if (wA) add(tri.concat(wA));
       const wB = pickWings(m, new Set([r]), 2, 'singles'); if (wB) add(tri.concat(wB));
+      // 「三张不可接」关闭时：更大的裸三张/三带一也可管三带二（仅最后一手，contextOK 过滤）
+      add(tri);
+      const w1 = pickWings(m, new Set([r]), 1, 'singles'); if (w1) add(tri.concat(w1));
     }
   } else if (t === 't1' || t === 'triple') {
     for (const r of ranks) if (r > key && cnt(r) >= 3) {
@@ -413,6 +417,106 @@ function aiCandidates(seat) {
     .sort((a, b) => b.score - a.score);
 }
 
+/* ================= AI 机器人桥接（pdk_ai 深度模型, ai_bridge.py :8766） ================= */
+const AI_BRIDGE = 'http://127.0.0.1:8766';
+const bridge = { sid: null, ready: false, mode: '', actions: [], actPending: false, initHands: null, syncing: false };
+
+function toBotCard(c) { return (c.r === 14 && c.s === 3) ? 44 : ((c.r - 3) << 2) | c.s; }
+function botRankToMy(idx) { return idx === 12 ? 15 : idx + 3; }   // bot点数0=3..11=A,12=2
+function rankSig(cards) { return cards.map(c => c.r).sort((a, b) => a - b).join(','); }
+function botRankSig(ids) { return ids.map(id => botRankToMy(id >> 2)).sort((a, b) => a - b).join(','); }
+function matchLegalByRank(botIds, legal) {
+  const sig = botRankSig(botIds);
+  return legal.find(p => rankSig(p.cards) === sig) || null;   // 花色不影响规则，按点数匹配
+}
+function fromBotIds(ids, pool) {
+  const map = new Map(pool.map(c => [toBotCard(c), c]));
+  return ids.map(id => map.get(id)).filter(Boolean);
+}
+function legalKey(cs) { return cs.map(c => c.i).sort((a, b) => a - b).join(','); }
+
+async function bridgeApi(path, body, timeoutMs = 15000) {
+  const ctl = new AbortController();
+  const tm = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    const r = await fetch(AI_BRIDGE + path, {
+      method: body !== undefined ? 'POST' : 'GET',
+      headers: { 'Content-Type': 'application/json' },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: ctl.signal,
+    });
+    return await r.json();
+  } finally { clearTimeout(tm); }
+}
+async function bridgeHealth() {
+  try { const r = await bridgeApi('/health', undefined, 3000); return !!r.ok; } catch { return false; }
+}
+function bridgeOpts() {
+  return { sanzhang: S.opts.sanzhang, nobomb: S.opts.nobomb, red10: S.opts.red10, four3: S.opts.four3 };
+}
+async function bridgeNewRound() {
+  bridge.sid = null; bridge.ready = false; bridge.actions = []; bridge.actPending = false;
+  if (S.mode !== 'ai' || !(await bridgeHealth())) { setBridgeMode(false); return; }
+  const hands0 = S.hands[0].map(toBotCard), hands1 = S.hands[1].map(toBotCard);
+  try {
+    const r = await bridgeApi('/init', {
+      hands: [hands0, hands1],
+      leader: S.roundLeader, opts: bridgeOpts(),
+    }, 8000);
+    if (r.sid) {
+      bridge.sid = r.sid; bridge.mode = r.mode || 'hybrid'; bridge.ready = true;
+      bridge.initHands = [hands0, hands1];               // 重连重放用初始发牌
+      setBridgeMode(true);
+      // init 期间可能已有落子（AI先手竞态）：带着完整历史重放一次
+      if (bridge.actions.length) await bridgeResync();
+    }
+    else setBridgeMode(false);
+  } catch { setBridgeMode(false); }
+  if (S.screen === 'game') render();
+}
+async function bridgeResync() {
+  // 影子失同步：用本局初始发牌 + 完整动作历史重建会话（并发保护）
+  if (bridge.syncing || !bridge.initHands) return;
+  bridge.syncing = true;
+  bridge.ready = false;
+  try {
+    const r = await bridgeApi('/init', {
+      hands: bridge.initHands, leader: S.roundLeader, opts: bridgeOpts(),
+      actions: bridge.actions,
+    }, 12000);
+    bridge.sid = r.sid || null; bridge.ready = !!r.sid;
+  } catch { bridge.ready = false; }
+  finally { bridge.syncing = false; }
+}
+async function bridgeMirror(seat, myCards) {
+  // 历史无条件记录（重放数据源）；/act 已在桥内落子的只记录不重发
+  const wasActApplied = bridge.actPending;
+  bridge.actPending = false;
+  bridge.actions.push({ seat, cards: myCards.map(toBotCard) });
+  if (wasActApplied) return;
+  if (!bridge.sid || !bridge.ready) {
+    if (S.mode === 'ai' && bridge.initHands && !bridge.syncing) bridgeResync();  // 无会话时尝试重建
+    return;
+  }
+  try {
+    const r = await bridgeApi('/action', { sid: bridge.sid, seat, cards: bridge.actions.at(-1).cards });
+    if (!r.ok) throw new Error(r.error || 'mirror failed');
+  } catch { if (!bridge.syncing) bridgeResync(); }
+}
+async function bridgeSuggestForTurn() {
+  if (!bridge.ready) return null;
+  try {
+    const r = await bridgeApi('/suggest', { sid: bridge.sid }, 20000);
+    if (!r.cards) return null;
+    const legal = legalPlays(S.hands[S.turn], { last: S.last ? S.last.combo : null, oppCount: S.hands[1 - S.turn].length }, S.opts);
+    return matchLegalByRank(r.cards, legal) || null;     // 内核建议未命中我方合法集 -> 用内置
+  } catch { return null; }
+}
+function setBridgeMode(on) {
+  if (S.bridgeMode !== on) { S.bridgeMode = on; if (S.screen === 'game') render(); }
+}
+/* 注册回调放在 init() 中（externalAI 以 let 声明在本段之后，加载期赋值会触发 TDZ） */
+
 /* ================= 可插拔 AI 模型接口 =================
  * 预留的机器人模型接入点（后续接外部模型/接口时使用）：
  *
@@ -462,12 +566,12 @@ async function aiMove() {
       console.error('[PdkAI] 模型调用失败，回退内置 AI：', e);
     }
   }
-  if (!cards) {                                          // 内置贪心 AI
+  if (!cards) {                                          // 内置贪心 AI 兜底
     const cands = aiCandidates(seat);
     if (!cands.length) { applyPass(seat); return; }
     cards = cands[0].p.cards;
   }
-  applyPlay(seat, cards);
+  applyPlay(seat, cards);                                // 镜像统一在 applyPlay/applyPass 里做
 }
 /* ================= 流程 ================= */
 function startMatch() {
@@ -482,6 +586,9 @@ function startMatch() {
   S.total = [0, 0]; S.history = []; S.roundNo = 0; S.lastWinner = null;
   if (S.mode === 'ai') { S.names = ['我', '电脑']; S.avatars = ['🙂', '🤖']; }
   else { S.names = ['玩家一', '玩家二']; S.avatars = ['🧑', '👦']; }
+  bridgeHealth().then(ok => {
+    if (S.mode === 'ai') toast(ok ? '🤖 已接入 AI 机器人（深度模型驱动电脑并优化提示）' : 'AI 机器人未连接，电脑使用内置 AI', 3000);
+  });
   showScreen('game');
   nextRound();
 }
@@ -511,6 +618,8 @@ function startRound() {
     toast(S.names[leader] + '持有黑桃3，先出牌', 2600);
   } else leader = S.lastWinner;
   S.turn = leader;
+  S.roundLeader = leader;
+  if (S.mode === 'ai') bridgeNewRound();           // 同步影子牌局给 AI 机器人
   hideModal();
   beginTurn();
 }
@@ -564,6 +673,7 @@ function applyPlay(seat, cards) {
     msg = '💣 炸弹！结算时收 ' + BOMB_SCORE + ' 分';
   }
   S.selected = new Set(); S.hints = []; S.hintIdx = -1;
+  if (S.mode === 'ai') bridgeMirror(seat, cards);             // 镜像出牌（历史必记）
   if (hand.length === 1) toast('⚠ ' + S.names[seat] + ' 报单！只剩1张', 1800);
   if (msg) toast(msg, 1600);
   if (hand.length === 0) { S.lastWinner = seat; endRound(seat); return; }
@@ -575,6 +685,7 @@ function applyPass(seat) {
   S.shown[seat] = { pass: true };
   S.last = null;                                          // 对方获得自由出牌权
   S.selected = new Set(); S.hints = []; S.hintIdx = -1;
+  if (S.mode === 'ai') bridgeMirror(seat, []);                // 镜像过牌
   S.turn = 1 - seat;
   beginTurn();
 }
@@ -709,7 +820,7 @@ function render() {
   $('opp-name').textContent = S.names[opp];
   $('opp-count').textContent = S.hands[opp].length;
   const oppTags = [];
-  if (S.mode === 'ai') oppTags.push('<span class="tag ai">AI</span>');
+  if (S.mode === 'ai') oppTags.push('<span class="tag ai">' + (S.bridgeMode ? 'AI·深度模型' : 'AI·内置') + '</span>');
   else oppTags.push('<span class="tag human">真人</span>');
   $('opp-tags').innerHTML = oppTags.join('');
   $('seat-opp').classList.toggle('turn', S.turn === opp && S.phase === 'playing');
@@ -862,19 +973,27 @@ function humanPass() {
   if (legal.length) { toast('有牌必打：你能管上，不能不出'); render(); return; }
   applyPass(me);
 }
-function showHint() {
+async function showHint() {
   const me = myTurnHuman();
   if (me < 0 || !hasHintRight(me)) return;
-  const cands = aiCandidates(me);
-  if (!cands.length) { toast('没有能管上的牌，请点「不出」'); return; }
-  S.hints = cands.slice(0, 6).map(x => x.p);
-  S.hintIdx = (S.hintIdx + 1) % S.hints.length;
-  const p = S.hints[S.hintIdx];
+  let p = await bridgeSuggestForTurn();                // 优先：AI 机器人深度模型
+  let src = '深度模型';
+  if (!p) {
+    const cands = aiCandidates(me);                    // 降级：内置贪心 AI
+    if (!cands.length) { toast('没有能管上的牌，请点「不出」'); return; }
+    S.hints = cands.slice(0, 6).map(x => x.p);
+    S.hintIdx = (S.hintIdx + 1) % S.hints.length;
+    p = S.hints[S.hintIdx];
+    src = '内置AI';
+  } else {
+    S.hints = [p]; S.hintIdx = 0;
+  }
   S.selected = new Set(p.cards.map(c => c.i));
   const hb = $('hint-bar');
   hb.classList.remove('hidden');
-  $('hint-text').innerHTML = '建议 <b>' + comboName(p.combo) + '</b>：<span class="hint-cards">' +
-    p.cards.map(c => cardText(c)).join(' ') + '</span>（第 ' + (S.hintIdx + 1) + '/' + S.hints.length + ' 个，再点提示切换）';
+  $('hint-text').innerHTML = '建议<b>[' + src + ']</b> ' + comboName(p.combo) + '：<span class="hint-cards">' +
+    p.cards.map(c => cardText(c)).join(' ') + '</span>' +
+    (src === '内置AI' ? '（第 ' + (S.hintIdx + 1) + '/' + S.hints.length + ' 个，再点提示切换）' : '');
   render();
 }
 function quitToLobby() {
@@ -889,6 +1008,18 @@ function quitToLobby() {
 /* ================= 初始化 ================= */
 function init() {
   initLobby();
+  // AI 机器人回调：深度模型驱动 AI 座位；返回的牌必须命中我方合法候选，否则降级内置 AI
+  pdkRegisterAI(async (ctx) => {
+    if (!bridge.ready) return null;
+    try {
+      const r = await bridgeApi('/act', { sid: bridge.sid });
+      if (!r.cards) throw new Error(r.error || 'act failed');
+      const hit = matchLegalByRank(r.cards, ctx.legal);
+      if (!hit) { bridgeResync(); return null; }
+      bridge.actPending = true;              // 桥内已落子：applyPlay 镜像时只记历史不重发
+      return hit.cards;
+    } catch { bridgeResync(); return null; }
+  });
   $('btn-play').addEventListener('click', humanPlay);
   $('btn-pass').addEventListener('click', humanPass);
   $('btn-hint').addEventListener('click', showHint);
