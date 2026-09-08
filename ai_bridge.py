@@ -35,18 +35,73 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-DEFAULT_BOT_ROOT = Path(__file__).resolve().parent.parent / "pdk_ai_work" / "pdk_ai"
+DEFAULT_BOT_ROOT = Path(__file__).resolve().parent.parent / "pdk-ai-prod"     # 生产版仓库 (github.com/reportyao/pdk-ai)
+if not DEFAULT_BOT_ROOT.exists():
+    DEFAULT_BOT_ROOT = Path(__file__).resolve().parent.parent / "pdk_ai_work" / "pdk_ai"  # 同源工作副本
 BOT_ROOT = DEFAULT_BOT_ROOT
 if not BOT_ROOT.exists():
     BOT_ROOT = Path(__file__).resolve().parent      # 允许把桥放到 pdk_ai 目录内运行
 if str(BOT_ROOT) not in sys.path:
     sys.path.insert(0, str(BOT_ROOT))
 
-import server as bot_server          # noqa: E402  (复用 build_ai / DMC 兜底内核)
+import server as bot_server          # noqa: E402  (生产版服务层: DMC 兜底内核同源)
 from pdk import fast                 # noqa: E402
 from pdk.core import Config          # noqa: E402
 from pdk.engine import Game, counts_of_ids  # noqa: E402
 from pdk.fast import PASS_CODE       # noqa: E402
+
+# 生产双模式 (README「过夜全量判定·生产配置定版」):
+#   hybrid = solver28 + DMC-v1 fallback        —— 胜率优先 (生产配置)
+#   dual   = hybrid 接力, 小残局(<=14张)数值计分 —— 积分制净分优先
+PROD_MODES = {"hybrid": "c", "dual": "dual"}
+
+
+def build_prod_agent(engine: str):
+    """按生产 server.build_ai 同源逻辑构建智能体, 仅 SolverAgent 的 engine 可选。
+
+    hybrid -> engine='c'   (布尔定胜负, 生产配置)
+    dual   -> engine='dual' (<=14张数值计分接力, 积分制备选)
+    fallback 均为 DMC-v1 (ckpt/qnet.pt), 与生产配置一致。
+    """
+    import numpy as np  # noqa: F401
+    net = bot_server._dmc_net()
+    from pdk.agents import SolverAgent
+
+    class _QFB:
+        name = "dmc-fallback"
+
+        def __init__(self, seed=0):
+            self.last = 0
+            self.opp_p = False
+            self.stats = {"activated": 0}
+
+        def new_game(self, seat, my_cnt, opp_cnt=None):
+            self.last, self.opp_p = 0, False
+
+        def observe(self, p, mv, t4):
+            if mv:
+                self.last, self.opp_p = mv, False
+            else:
+                self.opp_p = True
+
+        def act(self, cg):
+            import torch
+            legal = cg.legal()
+            if len(legal) == 1:
+                return legal[0]
+            from train.features import encode_obs, encode_move
+            obs = encode_obs(cg, self.last, self.opp_p)
+            mf = np.stack([encode_move(m) for m in legal])
+            ob = torch.from_numpy(np.repeat(obs[None, :], len(legal), 0))
+            mvt = torch.from_numpy(mf)
+            with torch.no_grad():
+                q = net(ob, mvt)
+            return legal[int(q.reshape(-1).argmax())]
+
+    agent = SolverAgent(_QFB(), bot_server.CFG, total_threshold=28,
+                        max_rows=400000, engine=engine)
+    return agent, ("hybrid" if engine == "c" else engine)
+
 
 SESSIONS: dict = {}
 LOCK = threading.Lock()
@@ -81,15 +136,17 @@ def build_cfg(o: dict) -> Config:
 class Shadow:
     """一局的镜像状态 + AI 内核。"""
 
-    def __init__(self, hands, kitty, leader, opts):
+    def __init__(self, hands, kitty, leader, opts, prod_mode="hybrid"):
         self.created = time.time()
         self.cfg = build_cfg(opts)
+        engine = PROD_MODES.get(prod_mode, "c")
+        self.prod_mode = "hybrid" if engine == "c" else prod_mode
         h0, h1, k = sorted(hands[0]), sorted(hands[1]), sorted(kitty)
         assert len(h0) == 16 and len(h1) == 16 and len(k) == 16, "需要两手16张和扣底16张"
         assert sorted(h0 + h1 + k) == sorted(bot_server.DECK), "两手牌+扣底必须恰好构成48张"
         self.game = Game(cfg=self.cfg, first_player=leader, hands=[h0, h1], kitty=k)
         self.cg = fast.CGame(counts_of_ids(h0), counts_of_ids(h1), leader, self.cfg)
-        self.agent, self.mode = bot_server.build_ai(None)
+        self.agent, self.mode = build_prod_agent(engine)
         self.ai_seat = 1
         self.agent.new_game(self.ai_seat, list(self.game.cnt[self.ai_seat]))
         self.codes = []
@@ -137,7 +194,10 @@ def handle_init(p: dict):
     kitty = p.get("kitty", [])
     leader = int(p.get("leader", 0))
     opts = p.get("opts", {})
-    s = Shadow(hands, kitty, leader, opts)
+    prod_mode = str(p.get("mode", "hybrid")).lower()
+    if prod_mode not in PROD_MODES:
+        return {"error": f"unknown mode '{prod_mode}' (choose hybrid|dual)"}, 400
+    s = Shadow(hands, kitty, leader, opts, prod_mode)
     sid = uuid.uuid4().hex[:12]
     with LOCK:
         SESSIONS[sid] = s
@@ -210,8 +270,10 @@ def do_suggest(sid: str):
             return {"fallback": True}, 200
         init = s.init_payload
         codes = list(s.codes)
-    rep = Shadow(init["hands"], init.get("kitty", []), init["leader"], init["opts"])
+    rep = Shadow(init["hands"], init.get("kitty", []), init["leader"], init["opts"], getattr(s, "prod_mode", "hybrid"))
     with rep.lock:
+        # 关键：让内核以「座位0」视角重放决策（Belief 必须以被建议方的手牌构建）
+        rep.agent.new_game(0, list(rep.game.cnt[0]))
         for code in codes:
             rep._apply(code)
         if rep.game.finished or int(rep.game.turn) != 0:
@@ -249,7 +311,8 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/health":
                 with LOCK:
                     n = len(SESSIONS)
-                self._json({"ok": True, "agent": "hybrid", "sessions": n, "v": 3})
+                self._json({"ok": True, "agent": "prod", "modes": sorted(PROD_MODES),
+                            "botRoot": str(BOT_ROOT), "sessions": n, "v": 4})
             elif u.path == "/legal":
                 from urllib.parse import parse_qs
                 q = parse_qs(u.query)

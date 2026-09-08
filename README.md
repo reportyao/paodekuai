@@ -17,20 +17,27 @@ python server.py          # 默认 8310 端口，可改：python server.py 8080
 
 ## 🤖 AI 机器人桥接（深度模型，可选）
 
-接入了 `pdk_ai` 项目的深度学习跑得快 AI（SolverAgent 残局精确求解 + PIMC + DMC 神经网络兜底）：
+接入私有仓库 [reportyao/pdk-ai](https://github.com/reportyao/pdk-ai) 的**生产版**跑得快 AI（`pdk-ai-prod/` 本地副本，同源于 pdk_ai_work 工作副本），实现 README「生产配置定版」的**双模式**：
+
+| 模式 | 构造 | 定位 |
+|---|---|---|
+| `hybrid` | `SolverAgent(engine='c')` + DMC-v1(qnet.pt) fallback | 胜率优先（生产配置，布尔定胜负） |
+| `dual` | `SolverAgent(engine='dual')` 同上 | 积分制净分优先（≤14张数值计分接力） |
+
+大厅「AI 模式」下拉可切换，AI 座位标签显示当前模式（`AI·生产/hybrid胜率` / `AI·生产/dual积分`）；提示条同步标注建议来源。
 
 ```bash
-python ai_bridge.py       # 默认 :8766；--bot-root 指定 pdk_ai 项目路径
+python ai_bridge.py       # 默认 :8766；--bot-root 指定 pdk-ai 生产仓库路径
 ```
 
-或双击 `start_all.bat` 一键启动网页 + 桥。效果：
+或双击 `start_all.bat` 一键启动网页 + 桥。行为要点：
 
-- **人机对战**：桥就绪时电脑由深度模型驱动（座位标签「AI·深度模型」）；桥未启动或中途退出，自动无缝降级为内置贪心 AI（「AI·内置」），对局不中断。
-- **出牌提示**：你的提示优先走深度模型（提示条标注「深度模型」），不可用时回退内置 AI。
-- 原理是「影子牌局」：每局把初始发牌（16+16+16，含扣底16张）/规则/先手同步给桥，双方落子实时镜像，桥内由 pdk_ai 引擎决策；任何失步自动带完整动作历史重建会话。
+- **人机对战**：桥就绪时电脑由生产深度模型驱动；桥未启动或中途退出，自动无缝降级为内置贪心 AI（「AI·内置」），对局不中断。
+- **出牌提示**：优先走生产模型（含"建议不出"），残局求解偶发较慢时会先显示"深度模型思考中…"（45s 超时后回退内置 AI）。
+- 原理是「影子牌局」：每局把初始发牌（16+16+16，含扣底）/规则/先手/模式同步给桥，双方落子实时镜像，桥内由 pdk 引擎决策；任何失步自动带完整动作历史重建会话；AI 行动会等待桥初始化完成，消除先手竞态。
 - 牌 id 映射与 pdk_ai 全局约定一致（`id>>2` 点数、`id&3` 花色；A 槽位 44/45/46、黑桃2 槽位 48）。
-- 桥接口（JSON，带 CORS）：`POST /init` 建影子局、`POST /action` 镜像落子、`POST /act` AI 决策、`POST /suggest` 玩家建议、`GET /legal`、`GET /health`。
-- 桥端对局结束自动落盘到 `data/replays/<sid>.json`（含初始手牌、扣底、规则、动作码、胜负与积分），供 AI 复盘。
+- 桥接口（JSON，带 CORS）：`POST /init`（含 `mode: hybrid|dual`）、`POST /action`、`POST /act`、`POST /suggest`、`GET /legal`、`GET /health`（返回 `modes` 与 `botRoot`）。
+- 已验证：双模式自博弈完整局、hybrid vs dual 进程内对打（行为差异明显、胜负与净分曲线不同）、浏览器双模式端到端与提示来源压测。
 
 ## 对局记录 / 复盘
 

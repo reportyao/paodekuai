@@ -421,7 +421,7 @@ function aiCandidates(seat) {
 
 /* ================= AI 机器人桥接（pdk_ai 深度模型, ai_bridge.py :8766） ================= */
 const AI_BRIDGE = 'http://127.0.0.1:8766';
-const bridge = { sid: null, ready: false, mode: '', actions: [], actPending: false, initHands: null, initKitty: null, syncing: false };
+const bridge = { sid: null, ready: false, mode: '', actions: [], actPending: false, initHands: null, initKitty: null, syncing: false, initing: false, waiters: [] };
 
 function toBotCard(c) {
   if (c.r === 14) return 44 + ([1, 2, 3].indexOf(c.s)); // pdk_ai的三张A槽位: 44,45,46
@@ -465,25 +465,30 @@ async function bridgeHealth() {
 function bridgeOpts() {
   return { sanzhang: S.opts.sanzhang, nobomb: S.opts.nobomb, red10: S.opts.red10, four3: S.opts.four3 };
 }
+function prodMode() {
+  const el = $('sel-aimode');
+  return el && el.value === 'dual' ? 'dual' : 'hybrid';
+}
 async function bridgeNewRound() {
   bridge.sid = null; bridge.ready = false; bridge.actions = []; bridge.actPending = false;
-  if (S.mode !== 'ai' || !(await bridgeHealth())) { setBridgeMode(false); return; }
-  const hands0 = S.hands[0].map(toBotCard), hands1 = S.hands[1].map(toBotCard);
+  bridge.initing = true; bridge.waiters = [];
+  const flush = () => { bridge.initing = false; const ws = bridge.waiters.splice(0); ws.forEach(f => f()); };
   try {
+    if (S.mode !== 'ai' || !(await bridgeHealth())) { setBridgeMode(false); flush(); return; }
+    const hands0 = S.hands[0].map(toBotCard), hands1 = S.hands[1].map(toBotCard);
     const r = await bridgeApi('/init', {
       hands: [hands0, hands1], kitty: S.kitty.map(toBotCard),
-      leader: S.roundLeader, opts: bridgeOpts(),
+      leader: S.roundLeader, opts: bridgeOpts(), mode: prodMode(),
     }, 8000);
     if (r.sid) {
-      bridge.sid = r.sid; bridge.mode = r.mode || 'hybrid'; bridge.ready = true;
+      bridge.sid = r.sid; bridge.mode = r.mode || prodMode(); bridge.ready = true;
       bridge.initHands = [hands0, hands1];
       bridge.initKitty = S.kitty.map(toBotCard);           // 重连重放用初始发牌+扣底
       setBridgeMode(true);
-      // init 期间可能已有落子（AI先手竞态）：带着完整历史重放一次
-      if (bridge.actions.length) await bridgeResync();
     }
     else setBridgeMode(false);
   } catch { setBridgeMode(false); }
+  finally { flush(); }                                     // init 完成/失败后才放行 AI 行动，消除先手竞态
   if (S.screen === 'game') render();
 }
 async function bridgeResync() {
@@ -495,6 +500,7 @@ async function bridgeResync() {
     const r = await bridgeApi('/init', {
       hands: bridge.initHands, kitty: bridge.initKitty || [],
       leader: S.roundLeader, opts: bridgeOpts(),
+      mode: bridge.mode === 'dual' ? 'dual' : prodMode(),   // 重连保持本局模式
       actions: bridge.actions,
     }, 12000);
     bridge.sid = r.sid || null; bridge.ready = !!r.sid;
@@ -506,21 +512,26 @@ async function bridgeMirror(seat, myCards) {
   const wasActApplied = bridge.actPending;
   bridge.actPending = false;
   bridge.actions.push({ seat, cards: myCards.map(toBotCard) });
-  if (wasActApplied) return;
-  if (!bridge.sid || !bridge.ready) {
-    if (S.mode === 'ai' && bridge.initHands && !bridge.syncing) bridgeResync();  // 无会话时尝试重建
-    return;
-  }
-  try {
-    const r = await bridgeApi('/action', { sid: bridge.sid, seat, cards: bridge.actions.at(-1).cards });
-    if (!r.ok) throw new Error(r.error || 'mirror failed');
-  } catch { if (!bridge.syncing) bridgeResync(); }
+  const fin = (async () => {
+    if (wasActApplied) return;
+    if (!bridge.sid || !bridge.ready) {
+      if (S.mode === 'ai' && bridge.initHands && !bridge.syncing) bridgeResync();  // 无会话时尝试重建
+      return;
+    }
+    try {
+      const r = await bridgeApi('/action', { sid: bridge.sid, seat, cards: bridge.actions.at(-1).cards });
+      if (!r.ok) throw new Error(r.error || 'mirror failed');
+    } catch { if (!bridge.syncing) bridgeResync(); }
+  })();
+  bridge.lastMirror = fin;          // /suggest 前需等待镜像同步完成
+  await fin;
 }
 async function bridgeSuggestForTurn() {
   if (!bridge.ready) return null;
   try {
-    const r = await bridgeApi('/suggest', { sid: bridge.sid }, 20000);
-    if (!r.cards) return null;
+    const r = await bridgeApi('/suggest', { sid: bridge.sid }, 45000);   // 残局 PIMC 偶发较慢，放宽到45s
+    if (!r || r.fallback) return null;
+    if (Array.isArray(r.cards) && r.cards.length === 0) return { pass: true };   // 深度建议：不出
     const legal = legalPlays(S.hands[S.turn], { last: S.last ? S.last.combo : null, oppCount: S.hands[1 - S.turn].length }, S.opts);
     return matchLegalByRank(r.cards, legal) || null;     // 内核建议未命中我方合法集 -> 用内置
   } catch { return null; }
@@ -600,7 +611,7 @@ function startMatch() {
   if (S.mode === 'ai') { S.names = ['我', '电脑']; S.avatars = ['🙂', '🤖']; }
   else { S.names = ['玩家一', '玩家二']; S.avatars = ['🧑', '👦']; }
   bridgeHealth().then(ok => {
-    if (S.mode === 'ai') toast(ok ? '🤖 已接入 AI 机器人（深度模型驱动电脑并优化提示）' : 'AI 机器人未连接，电脑使用内置 AI', 3000);
+    if (S.mode === 'ai') toast(ok ? '🤖 已接入生产版 AI 机器人（hybrid / dual 双模式）' : 'AI 机器人未连接，电脑使用内置 AI', 3000);
   });
   showScreen('game');
   nextRound();
@@ -650,7 +661,9 @@ function beginTurn() {
   }
   if (S.turn === 1) {                                    // AI
     render();
-    S.aiTimer = setTimeout(aiMove, 750 + randInt(600));
+    const startAI = () => { S.aiTimer = setTimeout(aiMove, 600 + randInt(500)); };
+    if (S.mode === 'ai' && bridge.initing) bridge.waiters.push(startAI);  // 等桥初始化完成，消除先手竞态
+    else startAI();
   } else render();
 }
 function confirmHandover() {
@@ -874,7 +887,8 @@ function render() {
   $('opp-name').textContent = S.names[opp];
   $('opp-count').textContent = S.hands[opp].length;
   const oppTags = [];
-  if (S.mode === 'ai') oppTags.push('<span class="tag ai">' + (S.bridgeMode ? 'AI·深度模型' : 'AI·内置') + '</span>');
+  if (S.mode === 'ai') oppTags.push('<span class="tag ai">' +
+    (S.bridgeMode ? 'AI·生产/' + (bridge.mode === 'dual' ? 'dual积分' : 'hybrid胜率') : 'AI·内置') + '</span>');
   else oppTags.push('<span class="tag human">真人</span>');
   $('opp-tags').innerHTML = oppTags.join('');
   $('seat-opp').classList.toggle('turn', S.turn === opp && S.phase === 'playing');
@@ -1033,8 +1047,23 @@ function humanPass() {
 async function showHint() {
   const me = myTurnHuman();
   if (me < 0 || !hasHintRight(me)) return;
+  if (bridge.lastMirror) { try { await bridge.lastMirror; } catch {} }   // 等最后一手镜像落库，避免重放缺手
+  // 先给"思考中"反馈：深度残局求解可能需要数秒
+  const hb0 = $('hint-bar');
+  hb0.classList.remove('hidden');
+  $('hint-text').textContent = '🤖 深度模型思考中…（残局求解可能需要几秒）';
+  $('btn-adopt').classList.add('hidden');
   let p = await bridgeSuggestForTurn();                // 优先：AI 机器人深度模型
+  $('btn-adopt').classList.remove('hidden');
   let src = '深度模型';
+  if (p && p.pass) {                                   // 深度建议：不出（当前被压且无解）
+    S.selected = new Set(); S.hints = []; S.hintIdx = -1;
+    const hb = $('hint-bar');
+    hb.classList.remove('hidden');
+    $('hint-text').innerHTML = '建议<b>[深度模型]</b>：不出（当前无合法压制）';
+    render();
+    return;
+  }
   if (!p) {
     const cands = aiCandidates(me);                    // 降级：内置贪心 AI
     if (!cands.length) { toast('没有能管上的牌，请点「不出」'); return; }
