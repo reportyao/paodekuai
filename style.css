@@ -113,6 +113,16 @@ button { font-family: inherit; }
   background: linear-gradient(135deg, #35618f, #1d3a5c); border: 1px solid rgba(255,255,255,.25);
 }
 .s-backs i:first-child { margin-left: 0; }
+/* 明牌模式：显示对手真实手牌（mini 牌，自动换行） */
+.s-backs.revealed {
+  flex-wrap: wrap; height: auto; max-height: 132px; max-width: 320px;
+  background: rgba(0,0,0,.25); border: 1px dashed rgba(247,217,126,.4); border-radius: 8px; padding: 4px;
+  justify-content: center; overflow-y: auto;
+}
+.s-backs.revealed .mini { margin: 0 -8px 2px 0; }
+.s-backs.revealed .mini:last-child { margin-right: 0; }
+.reveal-btn { margin-top: 2px; opacity: .85; }
+.reveal-btn:hover { opacity: 1; }
 .s-thinking { font-size: 11px; color: #f7d97e; animation: blink 1.2s infinite; }
 @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
 .s-bao {

@@ -24,6 +24,7 @@ const S = {
   awaiting: null,                              // 热座：等待确认看牌的座位
   selected: new Set(), hints: [], hintIdx: -1,
   bridgeMode: false, roundLeader: 0,           // AI 机器人桥接状态 / 本局先手
+  revealOpp: false,                            // 测试：实时明牌对手手牌
   replay: null, replayArchive: [],
   aiTimer: null,
 };
@@ -437,40 +438,7 @@ function rankSig(cards) { return cards.map(c => c.r).sort((a, b) => a - b).join(
 function botRankSig(ids) { return ids.map(id => botRankToMy(id >> 2)).sort((a, b) => a - b).join(','); }
 function matchLegalByRank(botIds, legal) {
   const sig = botRankSig(botIds);
-  // 1) 按点数签名精确匹配（花色不影响规则）
-  const exact = legal.find(p => rankSig(p.cards) === sig);
-  if (exact) return exact;
-  // 2) 同牌型同主点的等价匹配：三带二/三带一/飞机的带牌任意（比大小只看主体），
-  //    深度模型可能选非最小带牌组合，而本地候选生成器只生成最小带牌。
-  try {
-    const bRanks = [...new Set(botIds.map(id => botRankToMy(id >> 2)))].sort((a, b) => a - b);
-    const bN = botIds.length;
-    const bCnt = {};
-    for (const id of botIds) { const r = botRankToMy(id >> 2); bCnt[r] = (bCnt[r] || 0) + 1; }
-    const bTriples = Object.keys(bCnt).filter(r => bCnt[r] === 3).map(Number).sort((a, b) => a - b);
-    const main = bTriples.length ? bTriples[bTriples.length - 1] : bRanks[bRanks.length - 1];
-    const equiv = legal.find(p => p.combo.len === bN && p.combo.t !== 'bomb'
-      && p.cards.length === bN
-      && rankSig(p.cards).split(',').filter(r => +r === main).length === (bCnt[main] || 0)
-      && p.combo.t === classifyBody(bRanks, bCnt));
-    if (equiv) return equiv;
-  } catch {}
-  return null;
-}
-function classifyBody(bRanks, bCnt) {
-  // 粗略主体类型判定（仅用于等价匹配）：与网页牌型命名对应
-  const nTotal = Object.values(bCnt).reduce((a, b) => a + b, 0);
-  const counts = Object.values(bCnt);
-  const hasTriple = counts.some(n => n === 3);
-  const hasQuad = counts.some(n => n === 4);
-  if (hasQuad) return 'quad3';
-  if (bRanks.length === 1) return bCnt[bRanks[0]] === 3 ? 'triple' : (bCnt[bRanks[0]] === 2 ? 'pair' : 'single');
-  if (hasTriple && nTotal === 5) return 't2';      // 三带二：带对或带两单都是3种以内点数
-  if (hasTriple) return 'plane';
-  const run = bRanks.every((r, i) => i === 0 || r === bRanks[i - 1] + 1);
-  if (counts.every(n => n === 2)) return 'pairseq';
-  if (run && bCnt[bRanks[0]] === 1) return 'straight';
-  return 't1';
+  return legal.find(p => rankSig(p.cards) === sig) || null;   // 精确诊断用；出牌路径已改为精确牌映射
 }
 function fromBotIds(ids, pool) {
   const byRank = new Map();
@@ -565,14 +533,33 @@ async function bridgeMirror(seat, myCards) {
   bridge.lastMirror = fin;          // /suggest 前需等待镜像同步完成
   await fin;
 }
+/* 桥返回的具体牌 id（与网页手牌同一牌库语义，toBotCard 双射可逆）精确映射回网页手牌。
+   返回 null 表示有 id 不在当前手牌里（影子失步信号）。 */
+function cardsFromBridge(ids, seat) {
+  const map = new Map(S.hands[seat].map(c => [toBotCard(c), c]));
+  const out = [];
+  for (const id of ids) {
+    const c = map.get(id);
+    if (!c) return null;
+    out.push(c);
+  }
+  return out;
+}
+
 async function bridgeSuggestForTurn() {
   if (!bridge.ready) return null;
   try {
     const r = await bridgeApi('/suggest', { sid: bridge.sid }, 45000);   // 残局 PIMC 偶发较慢，放宽到45s
     if (!r || r.fallback) return null;
-    if (Array.isArray(r.cards) && r.cards.length === 0) return { pass: true };   // 深度建议：不出
-    const legal = legalPlays(S.hands[S.turn], { last: S.last ? S.last.combo : null, oppCount: S.hands[1 - S.turn].length }, S.opts);
-    return matchLegalByRank(r.cards, legal) || null;     // 内核建议未命中我方合法集 -> 用内置
+    if (Array.isArray(r.cards) && r.cards.length === 0) {
+      // 深度建议：不出。仅当本地确认无解时才采纳（有牌必打保险）
+      const legal = legalPlays(S.hands[S.turn], { last: S.last ? S.last.combo : null, oppCount: S.hands[1 - S.turn].length }, S.opts);
+      return legal.length === 0 ? { pass: true } : null;
+    }
+    const cards = cardsFromBridge(r.cards, S.turn);
+    if (!cards) { bridgeResync(); return null; }         // 建议牌不在手中 -> 影子失步
+    if (!validateSelection(S.turn, cards).ok) { bridgeResync(); return null; }  // 全规则校验
+    return { cards, combo: analyzeShape(cards) };
   } catch { return null; }
 }
 function setBridgeMode(on) {
@@ -617,14 +604,15 @@ async function aiMove() {
   if (typeof externalAI === 'function') {
     try {
       const ret = await externalAI(ctx);
-      if (ret == null || (Array.isArray(ret) && ret.length === 0)) {
-        if (ctx.last) { applyPass(seat); return; }       // 模型选择不出（跟牌时合法）
+      if (Array.isArray(ret) && ret.length === 0) {
+        // 模型明确选择过：externalAI 已确认本地无解（有牌必打双保险）
+        const localLegal = legalPlays(hand, { last: S.last ? S.last.combo : null, oppCount: S.hands[1 - seat].length }, S.opts);
+        if (ctx.last && !localLegal.length) { applyPass(seat); return; }
+        console.warn('[PdkAI] 模型要过但本地有解，改用内置出牌');
       } else if (Array.isArray(ret)) {
-        const key = ids => ids.map(c => c.i).sort((a, b) => a - b).join(',');
-        const want = key(ret);
-        const hit = ctx.legal.find(p => key(p.cards) === want);
-        if (hit) cards = hit.cards;                      // 只接受合法候选，防止模型作弊/越权出牌
+        cards = ret;                         // externalAI 已做精确映射 + validateSelection 校验
       }
+      // ret == null：桥不可用/失步/异常 —— 一律走内置兜底，绝不当作过牌
     } catch (e) {
       console.error('[PdkAI] 模型调用失败，回退内置 AI：', e);
     }
@@ -932,7 +920,17 @@ function render() {
   $('opp-tags').innerHTML = oppTags.join('');
   $('seat-opp').classList.toggle('turn', S.turn === opp && S.phase === 'playing');
   $('opp-bao').classList.toggle('hidden', S.hands[opp].length !== 1);
-  $('opp-backs').innerHTML = '<i></i>'.repeat(Math.min(16, S.hands[opp].length));
+  // 对手牌背 / 明牌（测试功能：点击对手区的 👁 切换实时明牌）
+  const backs = $('opp-backs');
+  if (S.revealOpp) {
+    backs.classList.add('revealed');
+    backs.innerHTML = cardsHTML(S.hands[opp], true);
+    $('btn-reveal').textContent = '🙈 暗牌';
+  } else {
+    backs.classList.remove('revealed');
+    backs.innerHTML = '<i></i>'.repeat(Math.min(16, S.hands[opp].length));
+    $('btn-reveal').textContent = '👁 明牌';
+  }
   // 我方座位
   $('my-avatar').textContent = S.avatars[me];
   $('my-name').textContent = S.names[me];
@@ -1138,17 +1136,30 @@ function quitToLobby() {
 function init() {
   loadReplayArchive();
   initLobby();
-  // AI 机器人回调：深度模型驱动 AI 座位；返回的牌必须命中我方合法候选，否则降级内置 AI
+  // AI 机器人回调：深度模型驱动 AI 座位。
+  // 关键一致性原则：桥内落了什么牌，网页就出什么牌（精确双射映射 + 全规则校验），
+  // 保证影子牌局永不失步；映射失败/校验失败立即重建影子并回退内置 AI。
   pdkRegisterAI(async (ctx) => {
     if (!bridge.ready) return null;
     try {
       const r = await bridgeApi('/act', { sid: bridge.sid });
-      if (!r.cards) throw new Error(r.error || 'act failed');
-      const hit = matchLegalByRank(r.cards, ctx.legal);
-      if (!hit) { bridgeResync(); return null; }
+      if (!r || r.fallback) throw new Error(r && r.error || 'fallback');
+      if (Array.isArray(r.cards) && r.cards.length === 0) {
+        // 桥内判定"过"：仅当本地确认无解时才接受（有牌必打硬约束）
+        if (ctx.last && ctx.legal.length === 0) return [];
+        throw new Error('bridge passed while local has legal moves');   // 失步信号
+      }
+      const cards = cardsFromBridge(r.cards, ctx.seat);
+      if (!cards) throw new Error('cards not in hand (desync)');
+      const v = validateSelection(ctx.seat, cards);
+      if (!v.ok) throw new Error('bridge move invalid locally: ' + v.err);
       bridge.actPending = true;              // 桥内已落子：applyPlay 镜像时只记历史不重发
-      return hit.cards;
-    } catch { bridgeResync(); return null; }
+      return cards;
+    } catch (e) {
+      console.warn('[PdkAI]', e && e.message);
+      bridgeResync();
+      return null;                           // 内置贪心兜底（自身保证有牌必打）
+    }
   });
   $('btn-play').addEventListener('click', humanPlay);
   $('btn-pass').addEventListener('click', humanPass);
@@ -1163,6 +1174,7 @@ function init() {
   $('btn-rules-close').addEventListener('click', () => $('rules-modal').classList.add('hidden'));
   $('btn-score').addEventListener('click', showScoreboard);
   $('btn-score-close').addEventListener('click', () => $('score-modal').classList.add('hidden'));
+  $('btn-reveal').addEventListener('click', () => { S.revealOpp = !S.revealOpp; render(); });
   window.addEventListener('resize', relayoutHand);
   window.addEventListener('orientationchange', relayoutHand);
 }
