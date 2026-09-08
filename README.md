@@ -39,6 +39,34 @@ python ai_bridge.py       # 默认 :8766；--bot-root 指定 pdk-ai 生产仓库
 - 桥接口（JSON，带 CORS）：`POST /init`（含 `mode: hybrid|dual`）、`POST /action`、`POST /act`、`POST /suggest`、`GET /legal`、`GET /health`（返回 `modes` 与 `botRoot`）。
 - 已验证：双模式自博弈完整局、hybrid vs dual 进程内对打（行为差异明显、胜负与净分曲线不同）、浏览器双模式端到端与提示来源压测。
 
+### 跨平台提示
+
+pdk-ai 的 `pdk/fast.py` 默认只找 `c/pdk_core.dll`（Windows）。Linux 部署需按 `os.name` 选择 `pdk_core.dll / pdk_core.so`（pdk-ai-prod 副本已含此补丁），并编译 C 核心：`gcc -O2 -shared -fPIC -o pdk_core.so pdk_core.c -lm`；未编译时自动回退纯 Python（慢但可用）。
+
+## 🚀 线上部署（腾讯云 43.128.24.244）
+
+与掼蛋站并存，全部为**增量独立资源**，不改动其他服务：
+
+| 项 | 值 |
+|---|---|
+| 测试地址 | <http://43.128.24.244:8310/> |
+| 代码目录 | `/home/ubuntu/paodekuai/`（网页）、`/home/ubuntu/pdk-ai-prod/`（生产 AI） |
+| 网页服务 | `paodekuai-web.service`（系统 Python，:8310，内置 `/ai/*` 反向代理到桥） |
+| AI 服务 | `paodekuai-ai.service`（独立 venv `.venv`：numpy + CPU torch，仅监听 127.0.0.1:8766，不暴露公网） |
+| 对局回放 | `/home/ubuntu/paodekuai/data/replays/*.json`（每局自动落盘） |
+| 日志 | `/var/log/paodekuai-web.log`、`/var/log/paodekuai-ai.log` |
+
+网页前端通过同源 `/ai/*` 反代调用桥，浏览器无跨域、8766 端口无需开放公网。C 核心 `pdk_core.so` 已在服务器编译。
+
+常用命令：
+
+```bash
+systemctl status paodekuai-web paodekuai-ai
+sudo systemctl restart paodekuai-web paodekuai-ai
+ls -t /home/ubuntu/paodekuai/data/replays/*.json | head   # 最新对局
+python3 -m json.tool "$(ls -t /home/ubuntu/paodekuai/data/replays/*.json | head -1)"
+```
+
 ## 对局记录 / 复盘
 
 - 每局结束自动写入浏览器本地 `localStorage`（`pdk_replays_v1`，最多保留 100 局），无需手动保存。

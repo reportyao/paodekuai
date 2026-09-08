@@ -42,9 +42,17 @@ BOT_ROOT = DEFAULT_BOT_ROOT
 if not BOT_ROOT.exists():
     BOT_ROOT = Path(__file__).resolve().parent      # 允许把桥放到 pdk_ai 目录内运行
 if str(BOT_ROOT) not in sys.path:
-    sys.path.insert(0, str(BOT_ROOT))
+    sys.path.insert(0, str(BOT_ROOT))   # pdk / train 包从这里导入
 
-import server as bot_server          # noqa: E402  (生产版服务层: DMC 兜底内核同源)
+# 按显式文件路径加载 pdk-ai 的服务层。不能用 `import server`：
+# 本目录的网页 server.py 与之同名，sys.path 顺序稍有不符就会加载错（并因
+# 读 sys.argv 崩溃），importlib 按路径加载可彻底避开同名冲突。
+import importlib.util                 # noqa: E402
+_spec = importlib.util.spec_from_file_location("pdk_ai_server", str(BOT_ROOT / "server.py"))
+bot_server = importlib.util.module_from_spec(_spec)
+sys.modules["pdk_ai_server"] = bot_server
+_spec.loader.exec_module(bot_server)
+
 from pdk import fast                 # noqa: E402
 from pdk.core import Config          # noqa: E402
 from pdk.engine import Game, counts_of_ids  # noqa: E402

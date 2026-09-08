@@ -419,8 +419,12 @@ function aiCandidates(seat) {
     .sort((a, b) => b.score - a.score);
 }
 
-/* ================= AI 机器人桥接（pdk_ai 深度模型, ai_bridge.py :8766） ================= */
-const AI_BRIDGE = 'http://127.0.0.1:8766';
+/* ================= AI 机器人桥接（生产版 pdk-ai 双模式） =================
+ * 桥地址：网页由 server.py 托管时走同源 /ai 反代（本地与线上一致）；
+ * file:// 直开时回退直连本机桥。 */
+const AI_BRIDGE = location.protocol.startsWith('http')
+  ? location.origin + '/ai'
+  : 'http://127.0.0.1:8766';
 const bridge = { sid: null, ready: false, mode: '', actions: [], actPending: false, initHands: null, initKitty: null, syncing: false, initing: false, waiters: [] };
 
 function toBotCard(c) {
@@ -433,7 +437,40 @@ function rankSig(cards) { return cards.map(c => c.r).sort((a, b) => a - b).join(
 function botRankSig(ids) { return ids.map(id => botRankToMy(id >> 2)).sort((a, b) => a - b).join(','); }
 function matchLegalByRank(botIds, legal) {
   const sig = botRankSig(botIds);
-  return legal.find(p => rankSig(p.cards) === sig) || null;   // 花色不影响规则，按点数匹配
+  // 1) 按点数签名精确匹配（花色不影响规则）
+  const exact = legal.find(p => rankSig(p.cards) === sig);
+  if (exact) return exact;
+  // 2) 同牌型同主点的等价匹配：三带二/三带一/飞机的带牌任意（比大小只看主体），
+  //    深度模型可能选非最小带牌组合，而本地候选生成器只生成最小带牌。
+  try {
+    const bRanks = [...new Set(botIds.map(id => botRankToMy(id >> 2)))].sort((a, b) => a - b);
+    const bN = botIds.length;
+    const bCnt = {};
+    for (const id of botIds) { const r = botRankToMy(id >> 2); bCnt[r] = (bCnt[r] || 0) + 1; }
+    const bTriples = Object.keys(bCnt).filter(r => bCnt[r] === 3).map(Number).sort((a, b) => a - b);
+    const main = bTriples.length ? bTriples[bTriples.length - 1] : bRanks[bRanks.length - 1];
+    const equiv = legal.find(p => p.combo.len === bN && p.combo.t !== 'bomb'
+      && p.cards.length === bN
+      && rankSig(p.cards).split(',').filter(r => +r === main).length === (bCnt[main] || 0)
+      && p.combo.t === classifyBody(bRanks, bCnt));
+    if (equiv) return equiv;
+  } catch {}
+  return null;
+}
+function classifyBody(bRanks, bCnt) {
+  // 粗略主体类型判定（仅用于等价匹配）：与网页牌型命名对应
+  const nTotal = Object.values(bCnt).reduce((a, b) => a + b, 0);
+  const counts = Object.values(bCnt);
+  const hasTriple = counts.some(n => n === 3);
+  const hasQuad = counts.some(n => n === 4);
+  if (hasQuad) return 'quad3';
+  if (bRanks.length === 1) return bCnt[bRanks[0]] === 3 ? 'triple' : (bCnt[bRanks[0]] === 2 ? 'pair' : 'single');
+  if (hasTriple && nTotal === 5) return 't2';      // 三带二：带对或带两单都是3种以内点数
+  if (hasTriple) return 'plane';
+  const run = bRanks.every((r, i) => i === 0 || r === bRanks[i - 1] + 1);
+  if (counts.every(n => n === 2)) return 'pairseq';
+  if (run && bCnt[bRanks[0]] === 1) return 'straight';
+  return 't1';
 }
 function fromBotIds(ids, pool) {
   const byRank = new Map();
@@ -474,12 +511,14 @@ async function bridgeNewRound() {
   bridge.initing = true; bridge.waiters = [];
   const flush = () => { bridge.initing = false; const ws = bridge.waiters.splice(0); ws.forEach(f => f()); };
   try {
-    if (S.mode !== 'ai' || !(await bridgeHealth())) { setBridgeMode(false); flush(); return; }
+    if (S.mode !== 'ai') { setBridgeMode(false); return; }
     const hands0 = S.hands[0].map(toBotCard), hands1 = S.hands[1].map(toBotCard);
-    const r = await bridgeApi('/init', {
+    const doInit = () => bridgeApi('/init', {
       hands: [hands0, hands1], kitty: S.kitty.map(toBotCard),
       leader: S.roundLeader, opts: bridgeOpts(), mode: prodMode(),
-    }, 8000);
+    }, 20000);                                            // 跨海网络放宽到 20s
+    let r = await doInit();
+    if (!r.sid) r = await doInit();                       // 失败自动重试一次
     if (r.sid) {
       bridge.sid = r.sid; bridge.mode = r.mode || prodMode(); bridge.ready = true;
       bridge.initHands = [hands0, hands1];
@@ -1047,11 +1086,15 @@ function humanPass() {
 async function showHint() {
   const me = myTurnHuman();
   if (me < 0 || !hasHintRight(me)) return;
+  // 先手开局时桥可能仍在初始化（跨海约1~2秒）：等它完成再决策
+  for (let i = 0; i < 60 && bridge.initing; i++) await new Promise(r => setTimeout(r, 200));
   if (bridge.lastMirror) { try { await bridge.lastMirror; } catch {} }   // 等最后一手镜像落库，避免重放缺手
   // 先给"思考中"反馈：深度残局求解可能需要数秒
   const hb0 = $('hint-bar');
   hb0.classList.remove('hidden');
-  $('hint-text').textContent = '🤖 深度模型思考中…（残局求解可能需要几秒）';
+  $('hint-text').textContent = bridge.initing || !bridge.ready
+    ? 'AI 机器人未连接，使用内置建议…'
+    : '🤖 深度模型思考中…（残局求解可能需要几秒）';
   $('btn-adopt').classList.add('hidden');
   let p = await bridgeSuggestForTurn();                // 优先：AI 机器人深度模型
   $('btn-adopt').classList.remove('hidden');
