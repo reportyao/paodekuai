@@ -291,6 +291,17 @@ def do_suggest(sid: str):
     return {"cards": cards}, 200
 
 
+def do_decide(p: dict):
+    """无状态单步决策（pdk-ai 生产内核原生接口），供双真人模式的深度提示使用。
+
+    失败返回 fallback:true，前端回退内置提示。
+    """
+    try:
+        return bot_server._decide(p), 200
+    except Exception as e:
+        return {"error": str(e), "fallback": True}, 200
+
+
 class Handler(BaseHTTPRequestHandler):
     def _json(self, obj, code=200):
         data = json.dumps(obj).encode()
@@ -351,6 +362,8 @@ class Handler(BaseHTTPRequestHandler):
                 body, code = do_act(payload["sid"])
             elif u.path == "/suggest":
                 body, code = do_suggest(payload["sid"])
+            elif u.path == "/api/decide":
+                body, code = do_decide(payload)
             else:
                 body, code = {"error": "unknown endpoint"}, 404
             self._json(body, code)

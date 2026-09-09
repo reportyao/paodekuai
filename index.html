@@ -25,8 +25,25 @@
         </div>
         <div class="mode" data-mode="hotseat">
           <div class="mode-title">👥 双人热座</div>
-          <div class="mode-desc">玩家一（有AI提示）<br>VS 玩家二（无提示）</div>
+          <div class="mode-desc">一台设备轮流操作<br>玩家一有AI提示</div>
         </div>
+        <div class="mode" data-mode="online">
+          <div class="mode-title">🌐 在线对战</div>
+          <div class="mode-desc">创建房间发房号<br>好友加入，各玩各的设备</div>
+        </div>
+      </div>
+      <div id="online-panel" class="online-panel hidden">
+        <div class="field">
+          <label>你的昵称</label>
+          <input id="on-nick" maxlength="10" placeholder="输入昵称">
+        </div>
+        <div class="on-row">
+          <button id="btn-on-create" class="btn primary">🏠 创建房间</button>
+          <span class="on-or">或</span>
+          <input id="on-code" maxlength="4" inputmode="numeric" placeholder="房号">
+          <button id="btn-on-join" class="btn">加入</button>
+        </div>
+        <div class="on-tip" id="on-tip"></div>
       </div>
     </div>
 

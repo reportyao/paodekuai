@@ -624,6 +624,279 @@ async function aiMove() {
   }
   applyPlay(seat, cards);                                // 镜像统一在 applyPlay/applyPass 里做
 }
+/* ================= 在线双人对战（房间制，服务器权威 + 轮询） ================= */
+const ONLINE = {
+  token: null, seat: -1, code: '',
+  st: null,                       // 服务器视角快照
+  pollTimer: null, pollBusy: false,
+  legalIds: [],                   // 轮到自己时服务器下发的合法动作（牌id列表的列表）
+  lastSyncSig: '',
+};
+function pdkToCard(id) {
+  const idx = id >> 2;
+  return { i: id, r: idx === 12 ? 15 : idx + 3, s: id & 3 };
+}
+function onlineApi(path, body, timeoutMs = 15000) {
+  const ctl = new AbortController();
+  const tm = setTimeout(() => ctl.abort(), timeoutMs);
+  return fetch('/online' + path, {
+    method: body !== undefined ? 'POST' : 'GET',
+    headers: { 'Content-Type': 'application/json' },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal: ctl.signal,
+  }).then(r => r.json()).finally(() => clearTimeout(tm));
+}
+function onTip(msg) { $('on-tip').textContent = msg || ''; }
+
+async function onlineCreate() {
+  const name = $('on-nick').value.trim() || '房主';
+  onTip('创建中…');
+  try {
+    const r = await onlineApi('/api/create', {
+      name, rounds: +$('sel-rounds').value,
+      opts: { sanzhang: $('opt-sanzhang').checked, nobomb: $('opt-nobomb').checked,
+              red10: $('opt-red10').checked, four3: $('opt-four3').checked },
+    });
+    if (r.error) { onTip(r.error); return; }
+    ONLINE.token = r.token; ONLINE.seat = r.seat; ONLINE.code = r.code;
+    onTip('房间已创建，房号 ' + r.code + '，等待对手加入…');
+    startOnlineGame();
+  } catch (e) { onTip('创建失败：' + e.message); }
+}
+async function onlineJoin() {
+  const code = $('on-code').value.trim();
+  const name = $('on-nick').value.trim() || '玩家';
+  if (!/^\d{4}$/.test(code)) { onTip('请输入4位房号'); return; }
+  onTip('加入中…');
+  try {
+    const r = await onlineApi('/api/join', { code, name });
+    if (r.error) { onTip(r.error); return; }
+    ONLINE.token = r.token; ONLINE.seat = r.seat; ONLINE.code = r.code;
+    startOnlineGame();
+  } catch (e) { onTip('加入失败：' + e.message); }
+}
+function startOnlineGame() {
+  S.mode = 'online';
+  S.opts = {
+    sanzhang: $('opt-sanzhang').checked, nobomb: $('opt-nobomb').checked,
+    red10: $('opt-red10').checked, four3: $('opt-four3').checked,
+  };
+  S.rounds = +$('sel-rounds').value;
+  S.total = [0, 0]; S.history = []; S.roundNo = 0; S.lastWinner = null;
+  S.names = [ONLINE.seat === 0 ? ($('on-nick').value.trim() || '房主') : '房主',
+             ONLINE.seat === 0 ? '对手' : ($('on-nick').value.trim() || '玩家')];
+  S.avatars = ['🧑', '🧑'];
+  try { localStorage.setItem('pdk_online', JSON.stringify({ token: ONLINE.token, code: ONLINE.code, seat: ONLINE.seat })); } catch {}
+  clearTimeout(S.aiTimer); clearTimeout(ONLINE.pollTimer);
+  showScreen('game');
+  onlinePoll();                                    // 轮询驱动（含等待对手）
+}
+function onlineRestore() {
+  // 刷新/重开浏览器后恢复在线对局（token 仍有效时）
+  try {
+    const saved = JSON.parse(localStorage.getItem('pdk_online') || 'null');
+    if (saved && saved.token) {
+      ONLINE.token = saved.token; ONLINE.seat = saved.seat; ONLINE.code = saved.code;
+      startOnlineGame();
+      return true;
+    }
+  } catch {}
+  return false;
+}
+function onlineClearSaved() {
+  try { localStorage.removeItem('pdk_online'); } catch {}
+}
+function onlineStopPoll() { clearTimeout(ONLINE.pollTimer); ONLINE.pollTimer = null; }
+
+async function onlinePoll() {
+  if (S.mode !== 'online' || S.screen !== 'game') return;
+  if (ONLINE.pollBusy) { ONLINE.pollTimer = setTimeout(onlinePoll, 600); return; }
+  ONLINE.pollBusy = true;
+  try {
+    const st = await onlineApi('/api/state?token=' + ONLINE.token, undefined, 12000);
+    if (st.error) { toast('在线状态获取失败：' + st.error); }
+    else { ONLINE.st = st; onlineApplyState(st); }
+  } catch {}                                         // 网络抖动：下一轮继续
+  ONLINE.pollBusy = false;
+  if (S.mode === 'online' && S.screen === 'game')
+    ONLINE.pollTimer = setTimeout(onlinePoll, S.phase === 'playing' ? 900 : 1200);
+}
+function onlineApplyState(st) {
+  const me = st.seat, opp = 1 - me;
+  S.names[me] = st.names[me]; S.names[opp] = st.names[opp];
+  if (S.names[me] && S.names[opp]) {
+    try { localStorage.setItem('pdk_online', JSON.stringify({ token: ONLINE.token, code: ONLINE.code, seat: ONLINE.seat })); } catch {}
+  }
+  S.roundNo = st.round; S.rounds = st.rounds;
+  S.total = st.total.slice();
+  S.turn = st.turn; S.kitty = new Array(st.kittyN).fill(null);
+  S.history = st.history.map(h => ({ no: h.round, winner: h.winner, rem: h.rem, shut: h.shut, d0: h.delta[0], d1: h.delta[1] }));
+  S.hands[me] = st.hand.map(pdkToCard);
+  S.hands[opp] = new Array(st.oppN).fill(null);      // 对手手牌不下发，仅张数
+  S.shown[me] = st.myShown && !st.myShown.pass
+    ? { cards: st.myShown.cards.map(pdkToCard), pass: false }
+    : (st.myShown ? { pass: true } : null);
+  S.shown[opp] = st.oppShown && !st.oppShown.pass
+    ? { cards: st.oppShown.cards.map(pdkToCard), pass: false }
+    : (st.oppShown ? { pass: true } : null);
+  S.last = st.last ? { combo: trickToCombo(st.last.trick), by: opp } : null;
+  ONLINE.legalIds = st.legal || [];
+  const prevPhase = S.phase;
+  S.phase = st.phase === 'waiting' ? 'waiting' : (st.phase === 'playing' ? 'playing' : 'roundEnd');
+  if (st.matchEnd) S.phase = 'matchEnd';
+  S.roundResult = st.result || null;
+  if (prevPhase !== S.phase && (S.phase === 'roundEnd' || S.phase === 'matchEnd')) {
+    if (S.phase === 'roundEnd' && S.roundResult) {
+      const rr = S.roundResult;
+      S.history.push({ no: st.round, winner: rr.winner, rem: rr.rem, shut: rr.shut, d0: rr.delta[0], d1: rr.delta[1] });
+      showOnlineRoundModal(rr, st.matchEnd);
+    } else if (S.phase === 'matchEnd') {
+      showOnlineMatchEnd(st);
+    }
+  }
+  render();
+  // 轮到我时立即拉取一次，降低等待感
+  if (st.turn === me && S.phase === 'playing' && !ONLINE.pollBusy) onlinePoll();
+}
+function trickToCombo(t4) {
+  if (!t4) return null;
+  const map = { 0: 'single', 1: 'pair', 2: 'pairseq', 3: 'triple', 4: 't2', 5: 't1', 6: 'plane', 7: 'straight', 8: 'bomb', 9: 'quad3' };
+  return { t: map[t4[0]] || 'single', key: t4[1] === 12 ? 15 : t4[1] + 3, len: t4[2] };
+}
+function comboToTrick(combo) {
+  const map = { single: 0, pair: 1, pairseq: 2, triple: 3, t2: 4, t1: 5, plane: 6, planeBare: 6, straight: 7, bomb: 8, quad3: 9 };
+  return [map[combo.t] ?? 0, combo.key === 15 ? 12 : combo.key - 3, combo.len, combo.k || 0];
+}
+function showOnlineRoundModal(rr, matchEnd) {
+  const w = rr.winner;
+  $('m-title').textContent = '🏆 ' + S.names[w] + ' 获胜';
+  const lines = [];
+  lines.push(`<div class="res-line"><span class="k">底分</span><span class="v">${S.names[1 - w]}剩 ${rr.rem} 张` +
+    (rr.rem === 1 ? '（仅剩1张，不计分）' : '') + (rr.shut ? '，<b>关门！失分×2</b>' : '') + `</span></div>`);
+  lines.push(`<div class="res-line hl"><span class="k">本局得分</span><span class="v">${S.names[0]} <b class="num ${rr.delta[0] >= 0 ? 'pos' : 'neg'}">${rr.delta[0] > 0 ? '+' : ''}${rr.delta[0]}</b> ｜ ${S.names[1]} <b class="num ${rr.delta[1] >= 0 ? 'pos' : 'neg'}">${rr.delta[1] > 0 ? '+' : ''}${rr.delta[1]}</b></span></div>`);
+  lines.push(`<div class="res-line"><span class="k">累计</span><span class="v">${S.names[0]} <b>${S.total[0]}</b> : <b>${S.total[1]}</b> ${S.names[1]}（第 ${S.roundNo}/${S.rounds} 局）</span></div>`);
+  $('m-list').innerHTML = lines.join('');
+  $('btn-next').classList.remove('hidden');
+  $('btn-next').textContent = matchEnd ? '查看总成绩 →' : '下一局 →';
+  $('btn-rematch').classList.add('hidden');
+  $('btn-back-lobby').classList.add('hidden');
+  $('modal').classList.remove('hidden');
+  onlineStopPoll();
+}
+function showOnlineMatchEnd(st) {
+  S.phase = 'matchEnd';
+  const w = S.total[0] > S.total[1] ? 0 : S.total[1] > S.total[0] ? 1 : -1;
+  $('m-title').textContent = w < 0 ? '🤝 平局' : `🎉 ${S.names[w]} 最终获胜`;
+  let html = `<div class="big-score">总比分　${S.names[0]} <b>${S.total[0]}</b> : <b>${S.total[1]}</b> ${S.names[1]}</div>`;
+  html += '<div class="score-table-wrap"><table class="score-table"><tr><th>局</th><th>胜者</th><th>剩牌</th><th>关门</th><th>' + S.names[0] + '</th><th>' + S.names[1] + '</th></tr>';
+  for (const h of S.history) {
+    html += `<tr><td>${h.no}</td><td>${S.names[h.winner]}</td><td>${h.rem}</td><td>${h.shut ? '×2' : '-'}</td>` +
+      `<td class="${h.d0 >= 0 ? 'pos' : 'neg'}">${h.d0 > 0 ? '+' : ''}${h.d0}</td><td class="${h.d1 >= 0 ? 'pos' : 'neg'}">${h.d1 > 0 ? '+' : ''}${h.d1}</td></tr>`;
+  }
+  html += `<tr class="total"><td colspan="4">累计</td><td>${S.total[0]}</td><td>${S.total[1]}</td></tr></table></div>`;
+  $('m-list').innerHTML = html;
+  $('btn-next').classList.add('hidden');
+  $('btn-rematch').classList.remove('hidden');
+  $('btn-rematch').textContent = '回到大厅';
+  $('btn-back-lobby').classList.remove('hidden');
+  $('modal').classList.remove('hidden');
+  onlineStopPoll();
+}
+/* 在线模式动作提交 */
+async function onlineAct(cards) {
+  try {
+    const r = await onlineApi('/api/act', { token: ONLINE.token, cards });
+    if (r.error) { toast(r.error); return false; }
+    return true;
+  } catch (e) { toast('提交失败：' + e.message); return false; }
+}
+/* 在线/热座的深度提示（无状态 decide，pdk-ai 生产内核） */
+async function decideHint(seat) {
+  const hand = S.hands[seat];
+  if (!hand.length) return null;
+  const moves = S.roundMoves.map(m => ({
+    seat: S.mode === 'online' ? (m.seat === seat ? 0 : 1) : m.seat,
+    move: m.cards,                     // roundMoves 里存的已是牌 id（数字）
+    pass_on: m.pass_on || undefined,
+  }));
+  const trick = S.last ? comboToTrick(S.last.combo) : null;
+  try {
+    const r = await bridgeApi('/api/decide', {
+      my_hand: hand.map(toBotCard),
+      opp_n: S.hands[1 - seat].length,
+      trick, history: moves,
+    }, 45000);
+    if (!r || r.fallback || !Array.isArray(r.move)) return null;
+    if (r.move.length === 0) {
+      const legal = legalPlays(hand, { last: S.last ? S.last.combo : null, oppCount: S.hands[1 - seat].length }, S.opts);
+      return legal.length === 0 ? { pass: true } : null;
+    }
+    const cards = cardsFromBridge(r.move, seat);
+    if (!cards) return null;
+    if (!validateSelection(seat, cards).ok) return null;
+    return { cards, combo: analyzeShape(cards) };
+  } catch { return null; }
+}
+
+/* 在线模式专用渲染（结构复用热座 DOM） */
+function renderOnline() {
+  const st = ONLINE.st || {};
+  const me = ONLINE.seat, opp = 1 - me;
+  const waiting = S.phase === 'waiting';
+  // 顶栏
+  $('g-round').textContent = st.round || S.roundNo; $('g-rounds').textContent = st.rounds || S.rounds;
+  $('g-mode').textContent = '在线对战 · 房号 ' + ONLINE.code;
+  $('g-score').innerHTML = `${S.names[0]} <b>${S.total[0]}</b> : <b>${S.total[1]}</b> ${S.names[1]}`;
+  // 对手座位
+  $('opp-avatar').textContent = '🧑';
+  $('opp-name').textContent = S.names[opp];
+  $('opp-count').textContent = st.oppN ?? 16;
+  $('opp-tags').innerHTML = '<span class="tag human">真人</span>';
+  $('seat-opp').classList.toggle('turn', S.turn === opp && S.phase === 'playing');
+  $('opp-bao').classList.toggle('hidden', st.oppN !== 1);
+  renderOppArea(st.oppN ?? 0, false);
+  // 我方座位
+  $('my-avatar').textContent = '🙂';
+  $('my-name').textContent = S.names[me];
+  $('my-count').textContent = st.hand ? st.hand.length : 0;
+  $('my-tags').innerHTML = '<span class="tag human">真人</span><span class="tag hint-on">有AI提示</span>';
+  $('my-seat').classList.toggle('turn', S.turn === me && S.phase === 'playing');
+  $('my-bao').classList.toggle('hidden', st.hand ? st.hand.length !== 1 : true);
+  // 出牌区
+  const so = S.shown[opp], sm = S.shown[me];
+  $('opp-play-cards').innerHTML = so && !so.pass ? cardsHTML(so.cards) : '';
+  $('opp-play-label').innerHTML = !so ? '' : so.pass
+    ? `<span class="pass">${S.names[opp]}：不出</span>`
+    : `${S.names[opp]}：${comboName(analyzeShape(so.cards))}`;
+  $('my-play-cards').innerHTML = sm && !sm.pass ? cardsHTML(sm.cards) : '';
+  $('my-play-label').innerHTML = !sm ? '' : sm.pass
+    ? `<span class="pass">${S.names[me]}：不出</span>`
+    : `${S.names[me]}：${comboName(analyzeShape(sm.cards))}`;
+  // 中央消息 / 手牌 / 按钮
+  const cm = $('center-msg');
+  if (waiting) cm.textContent = `等待对手加入… 房号 ${ONLINE.code}（把房号告诉好友）`;
+  else if (S.phase === 'playing') {
+    const my = myTurnHuman() === me;
+    cm.textContent = my ? (S.last ? '轮到你了：管上或不出' : '轮到你了：任意牌型先出')
+      : '等待对方出牌…';
+  } else cm.textContent = '';
+  renderHandAndActions(me);
+}
+
+function renderOppArea(n, reveal) {
+  const backs = $('opp-backs');
+  $('btn-reveal').classList.toggle('hidden', S.mode !== 'ai');
+  if (S.revealOpp && S.mode === 'ai') {
+    backs.classList.add('revealed');
+    backs.innerHTML = cardsHTML(S.hands[1], true);
+    $('btn-reveal').textContent = '🙈 暗牌';
+  } else {
+    backs.classList.remove('revealed');
+    backs.innerHTML = '<i></i>'.repeat(Math.min(16, n));
+    $('btn-reveal').textContent = '👁 明牌';
+  }
+}
+
 /* ================= 流程 ================= */
 function startMatch() {
   S.mode = chosenMode;
@@ -742,7 +1015,8 @@ function applyPass(seat) {
   S.shown[seat] = { pass: true };
   S.last = null;                                          // 对方获得自由出牌权
   S.selected = new Set(); S.hints = []; S.hintIdx = -1;
-  S.roundMoves.push({ seat, cards: [], combo: null, pass: true, ts: Date.now() });
+  S.roundMoves.push({ seat, cards: [], combo: null, pass: true,
+    pass_on: S.last ? comboToTrick(S.last.combo) : null, ts: Date.now() });
   if (S.mode === 'ai') bridgeMirror(seat, []);                // 镜像过牌
   S.turn = 1 - seat;
   beginTurn();
@@ -878,10 +1152,14 @@ function hideModal() { $('modal').classList.add('hidden'); }
 function myTurnHuman() {
   if (S.phase !== 'playing' || S.awaiting != null) return -1;
   if (S.mode === 'ai') return S.turn === 0 ? 0 : -1;
+  if (S.mode === 'online') {
+    return (ONLINE.st && ONLINE.st.turn === ONLINE.seat) ? ONLINE.seat : -1;
+  }
   return S.turn;
 }
 function hasHintRight(seat) {
   if (S.mode === 'ai') return seat === 0;
+  if (S.mode === 'online') return true;                  // 在线双方都有 AI 提示
   return seat === 0;                                     // 热座：玩家一有提示
 }
 function comboName(c) {
@@ -903,6 +1181,7 @@ function comboName(c) {
 }
 function render() {
   if (S.screen !== 'game') return;
+  if (S.mode === 'online') return renderOnline();
   const me = S.mode === 'ai' ? 0 : S.turn;               // 热座渲染当前座位视角
   const opp = 1 - me;
   // 顶栏
@@ -920,17 +1199,8 @@ function render() {
   $('opp-tags').innerHTML = oppTags.join('');
   $('seat-opp').classList.toggle('turn', S.turn === opp && S.phase === 'playing');
   $('opp-bao').classList.toggle('hidden', S.hands[opp].length !== 1);
-  // 对手牌背 / 明牌（测试功能：点击对手区的 👁 切换实时明牌）
-  const backs = $('opp-backs');
-  if (S.revealOpp) {
-    backs.classList.add('revealed');
-    backs.innerHTML = cardsHTML(S.hands[opp], true);
-    $('btn-reveal').textContent = '🙈 暗牌';
-  } else {
-    backs.classList.remove('revealed');
-    backs.innerHTML = '<i></i>'.repeat(Math.min(16, S.hands[opp].length));
-    $('btn-reveal').textContent = '👁 明牌';
-  }
+  // 对手牌背 / 明牌（AI 人机模式的测试功能；热座/在线隐藏防剧透）
+  renderOppArea(S.hands[opp].length, S.revealOpp);
   // 我方座位
   $('my-avatar').textContent = S.avatars[me];
   $('my-name').textContent = S.names[me];
@@ -955,6 +1225,7 @@ function render() {
   renderHandAndActions(me);
 }
 function renderHandAndActions(me) {
+  if (S.mode === 'online') return renderHandOnline(me);
   const human = myTurnHuman();
   const isMyTurn = human === me;
   const hand = (S.mode === 'hotseat' && S.awaiting != null) ? [] : S.hands[me];
@@ -966,13 +1237,19 @@ function renderHandAndActions(me) {
     else cm.textContent = '等待 ' + S.names[S.turn] + ' 出牌…';
   } else cm.textContent = '';
   cm.classList.toggle('warn', isMyTurn && !!S.last && legalPlays(S.hands[me], { last: S.last.combo, oppCount: S.hands[1 - me].length }, S.opts).length === 0);
-  // 手牌
+  // 手牌：增量更新，避免每次渲染全量重建导致的“重发一遍”闪烁
   const handEl = $('hand');
-  handEl.innerHTML = hand.map(c => cardHTML(c, false)).join('');
+  const sig = hand.map(c => c.i).join(',');
+  const prevSig = handEl.dataset.sig || '';
+  if (sig !== prevSig) {
+    handEl.innerHTML = hand.map(c => cardHTML(c, false)).join('');
+    handEl.dataset.sig = sig;
+    handEl.querySelectorAll('.card').forEach(el => {
+      el.addEventListener('click', () => onCardClick(+el.dataset.id));
+    });
+  }
   handEl.querySelectorAll('.card').forEach(el => {
-    const id = +el.dataset.id;
-    if (S.selected.has(id)) el.classList.add('sel');
-    el.addEventListener('click', () => onCardClick(id));
+    el.classList.toggle('sel', S.selected.has(+el.dataset.id));
   });
   layoutHand();
   relayoutHand();   // rAF 再测一次，防止媒体查询/字体加载导致的宽度变化
@@ -1022,6 +1299,33 @@ function relayoutHand() {
   requestAnimationFrame(() => { if (S.screen === 'game') layoutHand(); });
 }
 
+/* 在线模式的手牌与按钮（服务器权威：legal 白名单） */
+function renderHandOnline(me) {
+  const st = ONLINE.st || {};
+  const handEl = $('hand');
+  const hand = S.hands[me] || [];
+  const sig = hand.map(c => c.i).join(',');
+  if (handEl.dataset.sig !== sig) {
+    handEl.innerHTML = hand.map(c => cardHTML(c, false)).join('');
+    handEl.dataset.sig = sig;
+    handEl.querySelectorAll('.card').forEach(el => {
+      el.addEventListener('click', () => onCardClick(+el.dataset.id));
+    });
+  }
+  handEl.querySelectorAll('.card').forEach(el => {
+    el.classList.toggle('sel', S.selected.has(+el.dataset.id));
+  });
+  layoutHand();
+  relayoutHand();
+  const isMyTurn = myTurnHuman() === me;
+  const selIds = [...S.selected].sort((a, b) => a - b).join(',');
+  const playOK = isMyTurn && selIds && ONLINE.legalIds.some(l => l.slice().sort((a, b) => a - b).join(',') === selIds);
+  $('btn-play').disabled = !playOK;
+  $('btn-pass').disabled = !(isMyTurn && st.legalPass);
+  $('btn-hint').classList.toggle('hidden', !isMyTurn);
+  if (!isMyTurn) $('hint-bar').classList.add('hidden');
+}
+
 /* ================= 出牌校验 ================= */
 function comboErrText(cards) {
   return '不是有效牌型（单张/对子/连对/顺子5-12张/三带二/飞机/炸弹）';
@@ -1057,10 +1361,22 @@ function initLobby() {
       document.querySelectorAll('.mode').forEach(x => x.classList.remove('active'));
       el.classList.add('active');
       chosenMode = el.dataset.mode;
+      $('online-panel').classList.toggle('hidden', chosenMode !== 'online');
+      $('btn-start').classList.toggle('hidden', chosenMode === 'online');
+      if (chosenMode === 'online') {
+        $('btn-history-lobby').classList.add('hidden');
+        $('btn-start').classList.add('hidden');
+      } else {
+        $('btn-start').classList.remove('hidden');
+        $('btn-history-lobby').classList.remove('hidden');
+      }
     });
   });
   document.querySelector('.mode[data-mode="ai"]').classList.add('active');
   $('btn-start').addEventListener('click', () => { startMatch(); });
+  $('btn-on-create').addEventListener('click', onlineCreate);
+  $('btn-on-join').addEventListener('click', onlineJoin);
+  $('on-code').addEventListener('keydown', e => { if (e.key === 'Enter') onlineJoin(); });
   $('btn-history-lobby').addEventListener('click', showReplayHistory);
   $('btn-history-close').addEventListener('click', () => $('history-modal').classList.add('hidden'));
   $('btn-export-all').addEventListener('click', exportAllReplays);
@@ -1068,14 +1384,30 @@ function initLobby() {
 function humanPlay() {
   const me = myTurnHuman();
   if (me < 0) return;
+  if (S.mode === 'online') return void onlinePlay();
   const sel = S.hands[me].filter(c => S.selected.has(c.i));
   const v = validateSelection(me, sel);
   if (!v.ok) { toast(v.err); return; }
   applyPlay(me, sel);
 }
+async function onlinePlay() {
+  const me = ONLINE.seat;
+  const sel = S.hands[me].filter(c => S.selected.has(c.i));
+  if (!sel.length) { toast('请先选牌'); return; }
+  const ids = sel.map(c => c.i).sort((a, b) => a - b);
+  const hit = ONLINE.legalIds.find(l => l.slice().sort((a, b) => a - b).join(',') === ids.join(','));
+  if (!hit) { toast('不合法的出牌'); return; }
+  if (await onlineAct(ids)) {
+    S.selected = new Set();
+  }
+}
+async function onlinePass() {
+  if (await onlineAct([], true)) S.selected = new Set();
+}
 function humanPass() {
   const me = myTurnHuman();
   if (me < 0) return;
+  if (S.mode === 'online') return void onlinePass();
   if (!S.last) { toast('先出牌，不能不出'); return; }
   const legal = legalPlays(S.hands[me], { last: S.last.combo, oppCount: S.hands[1 - me].length }, S.opts);
   if (legal.length) { toast('有牌必打：你能管上，不能不出'); render(); return; }
@@ -1084,23 +1416,29 @@ function humanPass() {
 async function showHint() {
   const me = myTurnHuman();
   if (me < 0 || !hasHintRight(me)) return;
-  // 先手开局时桥可能仍在初始化（跨海约1~2秒）：等它完成再决策
-  for (let i = 0; i < 60 && bridge.initing; i++) await new Promise(r => setTimeout(r, 200));
-  if (bridge.lastMirror) { try { await bridge.lastMirror; } catch {} }   // 等最后一手镜像落库，避免重放缺手
-  // 先给"思考中"反馈：深度残局求解可能需要数秒
-  const hb0 = $('hint-bar');
-  hb0.classList.remove('hidden');
-  $('hint-text').textContent = bridge.initing || !bridge.ready
-    ? 'AI 机器人未连接，使用内置建议…'
-    : '🤖 深度模型思考中…（残局求解可能需要几秒）';
-  $('btn-adopt').classList.add('hidden');
-  let p = await bridgeSuggestForTurn();                // 优先：AI 机器人深度模型
-  $('btn-adopt').classList.remove('hidden');
-  let src = '深度模型';
+  let p = null, src = '深度模型';
+  const showWaiting = (txt) => {
+    $('hint-bar').classList.remove('hidden');
+    $('hint-text').textContent = txt;
+    $('btn-adopt').classList.add('hidden');
+  };
+  if (S.mode === 'ai') {
+    // 先手开局时桥可能仍在初始化（跨海约1~2秒）：等它完成再决策
+    for (let i = 0; i < 60 && bridge.initing; i++) await new Promise(r => setTimeout(r, 200));
+    if (bridge.lastMirror) { try { await bridge.lastMirror; } catch {} }   // 等最后一手镜像落库，避免重放缺手
+    showWaiting(bridge.initing || !bridge.ready
+      ? 'AI 机器人未连接，使用内置建议…'
+      : '🤖 深度模型思考中…（残局求解可能需要几秒）');
+    p = await bridgeSuggestForTurn();                // 优先：AI 机器人深度模型
+    $('btn-adopt').classList.remove('hidden');
+  } else {
+    // 热座（玩家一）/ 在线（双方）：pdk-ai 生产内核无状态 decide
+    showWaiting('🤖 深度模型思考中…（残局求解可能需要几秒）');
+    p = await decideHint(me);
+    $('btn-adopt').classList.remove('hidden');
+  }
   if (p && p.pass) {                                   // 深度建议：不出（当前被压且无解）
     S.selected = new Set(); S.hints = []; S.hintIdx = -1;
-    const hb = $('hint-bar');
-    hb.classList.remove('hidden');
     $('hint-text').innerHTML = '建议<b>[深度模型]</b>：不出（当前无合法压制）';
     render();
     return;
@@ -1125,7 +1463,10 @@ async function showHint() {
 }
 function quitToLobby() {
   clearTimeout(S.aiTimer);
+  onlineStopPoll();
+  if (S.mode === 'online') onlineClearSaved();
   S.phase = 'idle'; S.awaiting = null;
+  if (S.mode === 'online') S.mode = 'ai';
   hideModal();
   $('handover').classList.add('hidden');
   $('hint-bar').classList.add('hidden');
@@ -1136,6 +1477,7 @@ function quitToLobby() {
 function init() {
   loadReplayArchive();
   initLobby();
+  onlineRestore();   // 刷新后恢复进行中的在线对局
   // AI 机器人回调：深度模型驱动 AI 座位。
   // 关键一致性原则：桥内落了什么牌，网页就出什么牌（精确双射映射 + 全规则校验），
   // 保证影子牌局永不失步；映射失败/校验失败立即重建影子并回退内置 AI。
@@ -1166,8 +1508,19 @@ function init() {
   $('btn-hint').addEventListener('click', showHint);
   $('btn-adopt').addEventListener('click', humanPlay);
   $('btn-handover-ok').addEventListener('click', confirmHandover);
-  $('btn-next').addEventListener('click', () => { hideModal(); nextRound(); });
-  $('btn-rematch').addEventListener('click', () => { hideModal(); startMatch(); });
+  $('btn-next').addEventListener('click', () => {
+    hideModal();
+    if (S.mode === 'online') {
+      onlineApi('/api/next', { token: ONLINE.token }).then(r => { if (r.error) toast(r.error); onlinePoll(); });
+      return;
+    }
+    nextRound();
+  });
+  $('btn-rematch').addEventListener('click', () => {
+    hideModal();
+    if (S.mode === 'online') { quitToLobby(); return; }   // 在线的该按钮已改为“回到大厅”
+    startMatch();
+  });
   $('btn-back-lobby').addEventListener('click', quitToLobby);
   $('btn-quit').addEventListener('click', quitToLobby);
   $('btn-rules').addEventListener('click', () => $('rules-modal').classList.remove('hidden'));
