@@ -328,3 +328,11 @@ button { font-family: inherit; }
   .rv-no { width: 54px; font-size: 13px; }
   .rv-row .v { font-size: 12px; }
 }
+
+/* ---------- 首页 AI 版本 ---------- */
+.ai-ver { font-size: 12px; line-height: 1.7; margin: 4px 0 10px; padding: 7px 10px; border-radius: 9px;
+  background: rgba(0,0,0,.28); border: 1px dashed rgba(120,200,255,.35); color: #cfe6ff; word-break: break-all; }
+.ai-ver b { color: #f7d97e; }
+.ai-ver .ok { color: #7ef0a5; }
+.ai-ver .bad { color: #ff9a8a; font-weight: 700; }
+.ai-ver.warn { border-color: rgba(255,140,110,.6); background: rgba(80,25,15,.35); color: #ffcdbf; }

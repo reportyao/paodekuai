@@ -1503,6 +1503,30 @@ function onCardClick(id) {
   render();
 }
 let chosenMode = 'ai';
+/* 首页展示当前 AI 版本（模型 + 开局搜索 + 回退告警） */
+async function refreshAIVersion() {
+  const el = $('ai-version');
+  if (!el) return;
+  try {
+    const r = await bridgeApi('/health', undefined, 6000);
+    if (!r || !r.ok) throw new Error('down');
+    const md5 = (r.assets && r.assets.files && r.assets.files['ckpt/policy_a2c_final56.pt']) === 'OK';
+    const cfg = r.productionConfig || {};
+    const probe = r.netProbe || {};
+    const isFallback = probe.net && probe.net.indexOf('final56') < 0;
+    el.classList.toggle('warn', !!isFallback);
+    el.innerHTML = 'AI 模型：<b>' + (r.productionModel || '未知') + '</b>' +
+      (md5 ? ' <span class="ok">md5✓</span>' : ' <span class="bad">md5✗</span>') +
+      ' ｜ 开局搜索：<b>' + (cfg.openingSearch ? '开' : '关') + '</b>' +
+      ' ｜ 双模式：' + (r.modes || []).join('/') +
+      ' ｜ 实际加载：<b>' + (probe.net || '未知') + '</b>' +
+      (isFallback ? ' <span class="bad">⚠ 已回退旧网络</span>' : ' <span class="ok">在线</span>');
+  } catch {
+    el.classList.add('warn');
+    el.innerHTML = 'AI 模型：<b>内置贪心</b>（AI 服务未连接，此时电脑较弱、无深度提示）';
+  }
+}
+
 function initLobby() {
   document.querySelectorAll('.mode').forEach(el => {
     el.addEventListener('click', () => {
@@ -1635,6 +1659,7 @@ function quitToLobby() {
 function init() {
   loadReplayArchive();
   initLobby();
+  refreshAIVersion();
   onlineRestore();   // 刷新后恢复进行中的在线对局
   // AI 机器人回调：深度模型驱动 AI 座位。
   // 关键一致性原则：桥内落了什么牌，网页就出什么牌（精确双射映射 + 全规则校验），

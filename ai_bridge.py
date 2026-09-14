@@ -87,6 +87,26 @@ if os.name == "nt":
     ASSET_MD5["c/pdk_core.dll"] = "f49c46e86313075df918caad4fa2f085"
 
 
+_NET_PROBE = {"done": False, "net": None, "error": None, "ts": 0.0}
+
+
+def net_probe(refresh: bool = False) -> dict:
+    """探测“新会话实际会加载哪个网络”——暴露 final56 缺失时的静默回退。"""
+    import time as _t
+    if _NET_PROBE["done"] and not refresh and (_t.time() - _NET_PROBE["ts"] < 3600):
+        return {"net": _NET_PROBE["net"], "error": _NET_PROBE["error"]}
+    net, err = None, None
+    try:
+        fb = bot_server._QFB()          # 与每个会话构建路径完全一致
+        net = net_info(fb)
+        if getattr(fb, "use_x", False) is not True:
+            err = "已回退旧网络（final56 加载失败）"
+    except Exception as e:
+        err = f"{type(e).__name__}: {e}"
+    _NET_PROBE.update({"done": True, "net": net, "error": err, "ts": _t.time()})
+    return {"net": net, "error": err}
+
+
 def prod_config_info() -> dict:
     """生产推理配置自述：开局搜索是否开启（线上确认用）。"""
     try:
@@ -475,12 +495,15 @@ class Handler(BaseHTTPRequestHandler):
                             "modes": sorted(PROD_MODES),
                             "botRoot": str(BOT_ROOT), "sessions": n, "v": 6,
                             "productionConfig": prod_config_info(),
+                            "netProbe": net_probe(),
                             "assets": verify_assets()})
             elif u.path == "/stats":
                 with LOCK:
                     sess = list(SESSIONS.values())
                 agg = {"sessions": len(sess), "openingSearch": 0, "openingTime": 0.0,
-                       "oneShot": 0, "endgameOrder": 0, "reportDump": 0}
+                       "oneShot": 0, "endgameOrder": 0, "reportDump": 0, "nets": {}}
+                for s in sess:
+                    agg["nets"][getattr(s, "net", "?")] = agg["nets"].get(getattr(s, "net", "?"), 0) + 1
                 for s in sess:
                     st = getattr(s, "last_stats", {}) or {}
                     agg["openingSearch"] += int(st.get("opening_search", 0))
