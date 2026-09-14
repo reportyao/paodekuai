@@ -45,11 +45,26 @@ REPLAY_DIR = Path(__file__).resolve().parent / "data" / "online"
 REPLAY_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def next_replay_no(dirpath: Path, prefix: str) -> str:
+    """扫描目录内已有编号，取最大值 +1。"""
+    mx = 0
+    for f in dirpath.glob("*.json"):
+        try:
+            no = str(json.loads(f.read_text(encoding="utf-8")).get("no", ""))
+        except Exception:
+            continue
+        if no.startswith(prefix) and no[len(prefix):].isdigit():
+            mx = max(mx, int(no[len(prefix):]))
+    return f"{prefix}{mx + 1:04d}"
+
+
 def save_round_replay(room: "Room"):
     """每局结束落盘真人 vs 真人对局（复盘/学习用）。"""
     if room.roundResult is None:
         return
     payload = {
+        "no": next_replay_no(REPLAY_DIR, "H"),            # 对局编号（H0001…），方便定位
+        "timeText": time.strftime("%Y-%m-%d %H:%M:%S"),   # 本地可读时间
         "version": 2, "source": "online_room",
         "code": room.code, "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "names": list(room.names), "round": room.roundNo, "rounds": room.rounds,

@@ -95,6 +95,24 @@ python3 -m json.tool "$(ls -t /home/ubuntu/paodekuai/data/replays/*.json | head 
 | `data/online/*.json` | **在线真人局**：房号、双方昵称、初始手牌、扣底、每一手（牌面+牌型+剩余张数）、先手、结算与累计 |
 | `data/all_games.jsonl` | `export` 生成的全量合并文件，**一行一局**，可直接整份喂给 AI |
 
+**对局编号与时间**（方便快速定位后丢给 AI）：
+
+| 编号 | 含义 |
+|---|---|
+| `A0001, A0002 …` | 人机局（`data/replays`，座位0=你，座位1=AI） |
+| `H0001, H0002 …` | 在线真人局（`data/online`，两人房间对打） |
+
+每局 JSON 开头即 `no`(编号) 与 `timeText`(本地可读时间)；`list`/`show`/`export` 都按 **时间倒序** 展示，可用编号直接定位：
+
+```bash
+python3 replay_report.py list          # 全部对局（编号/时间/类型/参与/手数/结果）
+python3 replay_report.py list H        # 只看真人局（A=只看人机局）
+python3 replay_report.py show H0003    # 按编号看整局复盘（每手牌面可读）
+python3 replay_report.py raw H0003     # 该局原始 JSON，直接喂给 AI
+python3 replay_report.py export        # 全量 -> data/all_games.jsonl
+python3 replay_report.py export human_games.jsonl H   # 只导真人局
+```
+
 每手记录字段：`ply`(第几手) `seat`(座位) `cards`(牌 id 列表，过牌为空) `combo`(牌型: ptype/main/len/nc) `pass` `pass_on`(被过的牌型) `handAfter`(出牌后剩余张数)。
 牌 id：点数 = `id>>2`（0=3 … 11=A，12=2），花色 = `id&3`（0♠1♥2♣3♦）；ptype：0单 1对 2连对 3三张 4三带二 5三带一 6飞机 7顺子 8炸弹 9四带三。
 

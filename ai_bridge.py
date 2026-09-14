@@ -132,10 +132,25 @@ REPLAY_DIR = Path(__file__).resolve().parent / "data" / "replays"
 REPLAY_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def next_replay_no(dirpath: Path, prefix: str) -> str:
+    """扫描目录内已有编号，取最大值 +1（A=人机局 / H=真人对局）。"""
+    mx = 0
+    for f in dirpath.glob("*.json"):
+        try:
+            no = str(json.loads(f.read_text(encoding="utf-8")).get("no", ""))
+        except Exception:
+            continue
+        if no.startswith(prefix) and no[len(prefix):].isdigit():
+            mx = max(mx, int(no[len(prefix):]))
+    return f"{prefix}{mx + 1:04d}"
+
+
 def save_replay(sid: str, s: Shadow):
     if getattr(s, "saved", False) or not s.game.finished:
         return
     payload = {
+        "no": next_replay_no(REPLAY_DIR, "A"),        # 对局编号（A0001…），方便定位
+        "timeText": time.strftime("%Y-%m-%d %H:%M:%S"),  # 本地可读时间
         "version": 2, "source": "ai_bridge", "sid": sid,
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "names": ["human", "ai"], "mode": getattr(s, "prod_mode", "hybrid"),
