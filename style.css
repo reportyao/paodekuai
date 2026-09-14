@@ -337,12 +337,14 @@ button { font-family: inherit; }
 .ai-ver .bad { color: #ff9a8a; font-weight: 700; }
 .ai-ver.warn { border-color: rgba(255,140,110,.6); background: rgba(80,25,15,.35); color: #ffcdbf; }
 
-/* ---------- 对局页复盘按钮 ---------- */
-.btn.rev-btn { background: rgba(40,20,60,.55); border-color: rgba(200,160,255,.45); color: #e3d3ff; font-size: 13px; }
-.btn.rev-btn:hover:not(:disabled) { background: rgba(60,30,90,.7); }
+/* ---------- 对局页复盘按钮（顶部工具栏） ---------- */
+.btn.rev-btn { background: rgba(40,20,60,.45); border-color: rgba(200,160,255,.45); color: #e3d3ff; font-weight: 700; }
+.btn.rev-btn:hover:not(:disabled) { background: rgba(60,30,90,.65); }
 #g-game-no { font-family: Consolas, monospace; }
 @media (max-width: 760px) {
-  .btn.rev-btn { padding: 8px 10px; font-size: 12px; }
+  .topbar { padding: 5px 8px; gap: 5px; }
+  .tb-right { gap: 5px; }
+  .btn.rev-btn { padding: 4px 8px; }
 }
 
 .rev-pos { white-space: nowrap; }
