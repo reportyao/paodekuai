@@ -427,7 +427,7 @@ function aiCandidates(seat) {
 const AI_BRIDGE = location.protocol.startsWith('http')
   ? location.origin + '/ai'
   : 'http://127.0.0.1:8766';
-const bridge = { sid: null, ready: false, mode: '', actions: [], actPending: false, initHands: null, initKitty: null, syncing: false, initing: false, waiters: [], no: null, file: null, lastErr: '' };
+const bridge = { sid: null, ready: false, mode: '', actions: [], actPending: false, initHands: null, initKitty: null, syncing: false, initing: false, waiters: [], no: null, file: null, lastErr: '', _syncTask: null };
 
 function toBotCard(c) {
   if (c.r === 14) return 44 + ([1, 2, 3].indexOf(c.s)); // pdk_ai的三张A槽位: 44,45,46
@@ -451,6 +451,14 @@ function fromBotIds(ids, pool) {
   }).filter(Boolean);
 }
 function legalKey(cs) { return cs.map(c => c.i).sort((a, b) => a - b).join(','); }
+
+/* 对桥的写操作全部串行：跨海链路下镜像/决策可能乱序到达，串行可根除 400 竞态 */
+let _bridgeChain = Promise.resolve();
+function bridgeEnqueue(fn) {
+  const run = _bridgeChain.then(fn, fn);
+  _bridgeChain = run.then(() => {}, () => {});
+  return run;
+}
 
 async function bridgeApi(path, body, timeoutMs = 15000) {
   const ctl = new AbortController();
@@ -519,7 +527,7 @@ function scheduleBridgeRecover() {
   bridgeRecoverTimer = setInterval(async () => {
     if (S.mode !== 'ai' || S.phase !== 'playing' || S.screen !== 'game') return;
     if (bridge.ready || bridge.initing || bridge.syncing || !bridge.initHands) return;
-    await bridgeResync();
+    await bridgeResyncQueued();
     if (bridge.ready) {
       clearInterval(bridgeRecoverTimer); bridgeRecoverTimer = null;
       if (S.aiBlocked) {                       // 自动恢复：撤下暂停并继续对局（无需用户操作）
@@ -534,9 +542,9 @@ function scheduleBridgeRecover() {
   }, 6000);
 }
 async function bridgeResync() {
-  // 影子失同步：用本局初始发牌 + 完整动作历史重建会话（并发保护）
-  if (bridge.syncing) return false;
+  // 影子失同步：用本局初始发牌 + 完整动作历史重建会话
   if (!bridge.initHands) return false;
+  if (bridge.syncing) return bridge.ready;
   bridge.syncing = true;
   bridge.ready = false;
   try {
@@ -561,24 +569,39 @@ async function bridgeResync() {
   finally { bridge.syncing = false; }
   return bridge.ready;
 }
-async function bridgeMirror(seat, myCards) {
+/* 排队版重建：不与镜像/决策并发；并发调用复用同一任务 */
+function bridgeResyncQueued() {
+  if (bridge.syncing && bridge._syncTask) return bridge._syncTask;
+  bridge._syncTask = bridgeEnqueue(() => bridgeResync());
+  return bridge._syncTask;
+}
+function bridgeMirror(seat, myCards) {
   // 历史无条件记录（重放数据源）；/act 已在桥内落子的只记录不重发
   const wasActApplied = bridge.actPending;
   bridge.actPending = false;
   bridge.actions.push({ seat, cards: myCards.map(toBotCard) });
+  const ids = bridge.actions.at(-1).cards;
   const fin = (async () => {
-    if (wasActApplied) return;
+    if (wasActApplied) return true;
     if (!bridge.sid || !bridge.ready) {
-      if (S.mode === 'ai' && bridge.initHands && !bridge.syncing) bridgeResync();  // 无会话时尝试重建
-      return;
+      if (S.mode === 'ai' && bridge.initHands) bridgeResyncQueued();   // 无会话 -> 排队重建
+      return false;
     }
-    try {
-      const r = await bridgeApi('/action', { sid: bridge.sid, seat, cards: bridge.actions.at(-1).cards });
-      if (!r.ok) throw new Error(r.error || 'mirror failed');
-    } catch { if (!bridge.syncing) bridgeResync(); }
+    // 排队发送：保证“先镜像、后决策”的顺序
+    return bridgeEnqueue(async () => {
+      try {
+        const r = await bridgeApi('/action', { sid: bridge.sid, seat, cards: ids });
+        if (r.ok || r.duplicate) return true;
+        throw new Error(r.error || 'mirror failed');
+      } catch (e) {
+        bridge.lastErr = String((e && e.message) || e);
+        if (!bridge.syncing) bridgeResyncQueued();
+        return false;
+      }
+    });
   })();
   bridge.lastMirror = fin;          // /suggest 前需等待镜像同步完成
-  await fin;
+  return fin;
 }
 /* 桥返回的具体牌 id（与网页手牌同一牌库语义，toBotCard 双射可逆）精确映射回网页手牌。
    返回 null 表示有 id 不在当前手牌里（影子失步信号）。 */
@@ -651,6 +674,14 @@ async function aiMove() {
   };
   let cards = null;
   if (typeof externalAI === 'function') {
+    if (!bridge.ready && bridge.initHands) {
+      const t0 = Date.now();
+      while (!bridge.ready && Date.now() - t0 < 25000) {     // 等重建完成（跨海需数秒）
+        if (!bridge.syncing) await bridgeResyncQueued();
+        await new Promise(r => setTimeout(r, 800));
+      }
+      if (bridge.ready) toast('AI 服务已恢复，继续对局', 1800);
+    }
     try {
       const ret = await externalAI(ctx);
       if (Array.isArray(ret) && ret.length === 0) {
@@ -692,7 +723,7 @@ function aiError(msg) {
 }
 async function aiRetry() {
   hideModal();
-  const ok = await bridgeResync();
+  const ok = await bridgeResyncQueued();
   if (ok) {
     S.aiBlocked = false; S.aiErrorMsg = '';
     toast('AI 服务已恢复，继续对局', 2200);
@@ -1804,7 +1835,7 @@ function init() {
   pdkRegisterAI(async (ctx) => {
     if (!bridge.ready) return null;
     try {
-      const r = await bridgeApi('/act', { sid: bridge.sid });
+      const r = await bridgeEnqueue(() => bridgeApi('/act', { sid: bridge.sid }, 30000));   // 排队；超时放宽（CPU 被抢占时更宽容）
       if (!r || r.fallback) throw new Error(r && r.error || 'fallback');
       if (Array.isArray(r.cards) && r.cards.length === 0) {
         // 桥内判定"过"：仅当本地确认无解时才接受（有牌必打硬约束）

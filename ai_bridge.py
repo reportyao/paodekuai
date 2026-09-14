@@ -395,6 +395,11 @@ def do_action(sid: str, seat: int, cards):
         if s.game.finished:
             return False, "game finished"
         if int(s.game.turn) != seat:
+            # 幂等容忍：同一座位刚出的同一手重复到达（跨海乱序/客户端重发）按成功处理，避免误判失步
+            code_try = fast.cards_to_code(cards) if cards else PASS_CODE
+            if (s.codes and s.codes[-1] == code_try
+                    and s.moves_detail and s.moves_detail[-1].get("seat") == seat):
+                return True, {"duplicate": True}
             return False, f"not seat {seat}'s turn (turn={s.game.turn})"
         code = fast.cards_to_code(cards) if cards else PASS_CODE
         if cards and code not in s.cg.legal():
@@ -419,7 +424,12 @@ def do_act(sid: str):
         if int(s.game.turn) != s.ai_seat:
             return {"error": f"not ai turn (turn={s.game.turn})"}, 400
         try:
-            code = s.agent.act(s.cg)
+            _t0 = time.perf_counter()
+            with (_ACT_SEM or _NULL_SEM):        # 并发闸：多局并发时排队，避免 CPU 争抢导致超时
+                code = s.agent.act(s.cg)
+            _dt = time.perf_counter() - _t0
+            if _dt > 3.0:                        # 慢决策（多为 CPU 被其他作业抢占）留痕便于排查
+                print(f"[bridge] SLOW act {_dt:.1f}s (session {sid[:8]})", file=sys.stderr, flush=True)
             s.snapshot_stats()
             # 注意顺序：先由当前手牌把 code 映射成具体牌 id，再落子镜像
             # （落子后手牌已移除，code_to_cards 会取不到牌）
