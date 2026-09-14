@@ -477,28 +477,53 @@ function prodMode() {
 async function bridgeNewRound() {
   bridge.sid = null; bridge.ready = false; bridge.actions = []; bridge.actPending = false;
   bridge.initing = true; bridge.waiters = [];
+  bridge.no = null; bridge.file = null;
   const flush = () => { bridge.initing = false; const ws = bridge.waiters.splice(0); ws.forEach(f => f()); };
   try {
     if (S.mode !== 'ai') { setBridgeMode(false); return; }
-    const hands0 = S.hands[0].map(toBotCard), hands1 = S.hands[1].map(toBotCard);
+    // 先固化“本局初始发牌”（无论 init 成功与否）——后续任何时刻都能据此重建影子局
+    bridge.initHands = [S.hands[0].map(toBotCard), S.hands[1].map(toBotCard)];
+    bridge.initKitty = S.kitty.map(toBotCard);
     const doInit = () => bridgeApi('/init', {
-      hands: [hands0, hands1], kitty: S.kitty.map(toBotCard),
+      hands: bridge.initHands, kitty: bridge.initKitty,
       leader: S.roundLeader, opts: bridgeOpts(), mode: prodMode(),
     }, 20000);                                            // 跨海网络放宽到 20s
-    let r = await doInit();
-    if (!r.sid) r = await doInit();                       // 失败自动重试一次
+    // 失败带退避重试（服务重启/网络抖动时不至于整局降级为内置 AI）
+    let r = {};
+    for (let attempt = 0; attempt < 3 && !r.sid; attempt++) {
+      try { r = await doInit(); } catch (e) { r = {}; }
+      if (!r.sid && attempt < 2) await new Promise(res => setTimeout(res, 800 * (attempt + 1)));
+    }
     if (r.sid) {
       bridge.sid = r.sid; bridge.mode = r.mode || prodMode(); bridge.ready = true;
       bridge.no = r.no || null; bridge.file = r.file || null;   // 本局编号（复盘当局用）
       S.currentNo = r.no || null;
-      bridge.initHands = [hands0, hands1];
-      bridge.initKitty = S.kitty.map(toBotCard);           // 重连重放用初始发牌+扣底
       setBridgeMode(true);
+    } else {
+      setBridgeMode(false);
+      toast('AI 服务未就绪，本局先用内置 AI（后台会自动重连）', 2600);
+      scheduleBridgeRecover();
     }
-    else setBridgeMode(false);
   } catch { setBridgeMode(false); }
   finally { flush(); }                                     // init 完成/失败后才放行 AI 行动，消除先手竞态
   if (S.screen === 'game') render();
+}
+
+/* 后台自动重连：桥掉线（含服务重启窗口）时，通过重放本局动作重建影子局，
+   避免整局退化为内置 AI，也保证本局仍有编号可复盘。 */
+let bridgeRecoverTimer = null;
+function scheduleBridgeRecover() {
+  if (bridgeRecoverTimer) return;
+  bridgeRecoverTimer = setInterval(async () => {
+    if (S.mode !== 'ai' || S.phase !== 'playing' || S.screen !== 'game') return;
+    if (bridge.ready || bridge.initing || bridge.syncing || !bridge.initHands) return;
+    await bridgeResync();
+    if (bridge.ready) {
+      toast('已重新连上 AI 服务（' + (bridge.no ? '本局 ' + bridge.no : '') + '）', 2200);
+      clearInterval(bridgeRecoverTimer); bridgeRecoverTimer = null;
+      if (S.screen === 'game') render();
+    }
+  }, 6000);
 }
 async function bridgeResync() {
   // 影子失同步：用本局初始发牌 + 完整动作历史重建会话（并发保护）
@@ -514,6 +539,13 @@ async function bridgeResync() {
       actions: bridge.actions,
     }, 12000);
     bridge.sid = r.sid || null; bridge.ready = !!r.sid;
+    if (bridge.ready) {
+      bridge.no = r.no || bridge.no; bridge.file = r.file || bridge.file;
+      bridge.mode = r.mode || bridge.mode;
+      S.currentNo = bridge.no;                              // 重连后编号不变
+      setBridgeMode(true);                                  // 标签切回“AI·胜率/净分优先”
+      if (bridgeRecoverTimer) { clearInterval(bridgeRecoverTimer); bridgeRecoverTimer = null; }
+    }
   } catch { bridge.ready = false; }
   finally { bridge.syncing = false; }
 }
@@ -1389,7 +1421,8 @@ function render() {
   $('opp-count').textContent = S.hands[opp].length;
   const oppTags = [];
   if (S.mode === 'ai') oppTags.push('<span class="tag ai">' +
-    (S.bridgeMode ? 'AI·' + (bridge.mode === 'dual' ? '净分优先' : '胜率优先') : 'AI·内置') + '</span>');
+    (S.bridgeMode ? 'AI·' + (bridge.mode === 'dual' ? '净分优先' : '胜率优先')
+                  : ('AI·内置' + (bridge.initHands && S.mode === 'ai' ? '·重连中' : ''))) + '</span>');
   else oppTags.push('<span class="tag human">真人</span>');
   $('opp-tags').innerHTML = oppTags.join('');
   $('seat-opp').classList.toggle('turn', S.turn === opp && S.phase === 'playing');
@@ -1699,6 +1732,7 @@ async function showHint() {
 }
 function quitToLobby() {
   clearTimeout(S.aiTimer);
+  if (bridgeRecoverTimer) { clearInterval(bridgeRecoverTimer); bridgeRecoverTimer = null; }
   onlineStopPoll();
   if (S.mode === 'online') onlineClearSaved();
   S.phase = 'idle'; S.awaiting = null;
