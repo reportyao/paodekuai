@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -168,7 +169,10 @@ def build_prod_agent(engine: str):
 
 SESSIONS: dict = {}
 LOCK = threading.Lock()
-MAX_SESSIONS = 60
+MAX_SESSIONS = 500          # 上限放宽；淘汰时优先丢弃已结束/最旧的会话，避免打断进行中的对局
+_ACT_SEM = None             # 决策并发闸（在 main() 里按 CPU 初始化）
+_NULL_SEM = contextlib.nullcontext()   # 导入期占位（无锁语义）
+RESTORING = True                       # 启动恢复进行中（此期间的旧会话请求提示重试）
 REPLAY_DIR = Path(__file__).resolve().parent / "data" / "replays"
 REPLAY_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -280,6 +284,7 @@ class Shadow:
         self.moves_detail = []
         self.init_payload = {"hands": [h0, h1], "kitty": k, "leader": leader, "opts": opts}
         self.bad = False                     # 影子失效 -> 通知网页版降级
+        self.restoring = False               # 恢复重放期间跳过逐步写盘（提速）
         self.lock = threading.Lock()
 
     # 与 pdk_ai server._apply 相同的镜像顺序：先 observe 后落子
@@ -318,7 +323,8 @@ class Shadow:
             self.game._play_unchecked(code)
         self.cg.step(code)
         self.codes.append(code)
-        write_replay(self, live=True)                     # 实时落盘（复盘当局/上一局都能看到最新进度）
+        if not self.restoring:
+            write_replay(self, live=True)                 # 实时落盘（复盘当局/上一局都能看到最新进度）
 
     def legal_ids(self, seat: int):
         return [list(fast.code_to_cards(c, self.game.hand_ids(seat)))
@@ -327,14 +333,26 @@ class Shadow:
 
 def get_sess(sid: str) -> Shadow:
     with LOCK:
-        return SESSIONS[sid]
+        s = SESSIONS.get(sid)
+    if s is not None:
+        return s
+    if RESTORING:
+        raise RuntimeError("会话恢复中（服务刚重启），请稍后重试")
+    raise KeyError(sid)
 
 
 def evict_old():
+    """达到上限时：先丢已结束的，再丢最旧的；只有万不得已才丢进行中的局（并打日志）。"""
     with LOCK:
         while len(SESSIONS) > MAX_SESSIONS:
-            k = min(SESSIONS, key=lambda s: SESSIONS[s].created)
-            SESSIONS.pop(k, None)
+            finished = [k for k, s in SESSIONS.items()
+                        if getattr(s.game, "finished", False)]
+            pool = finished or list(SESSIONS.keys())
+            k = min(pool, key=lambda s: SESSIONS[s].created)
+            victim = SESSIONS.pop(k)
+            if not getattr(victim.game, "finished", False):
+                print(f"[bridge] WARN 淘汰进行中会话 {k}（编号 {getattr(victim,'no','?')}）",
+                      file=sys.stderr, flush=True)
 
 
 def handle_init(p: dict):
@@ -346,7 +364,7 @@ def handle_init(p: dict):
     if prod_mode not in PROD_MODES:
         return {"error": f"unknown mode '{prod_mode}' (choose hybrid|dual)"}, 400
     cleanup_stale_live()
-    sid = uuid.uuid4().hex[:12]
+    sid = str(p.get("sid") or "") or uuid.uuid4().hex[:12]     # 重连时复用同一 sid
     s = Shadow(hands, kitty, leader, opts, prod_mode, sid=sid,
                reuse_no=p.get("no"), reuse_file=p.get("file"))
     with LOCK:
@@ -435,7 +453,8 @@ def do_suggest(sid: str):
             return {"cards": None, "reason": "本局已结束"}, 200
         if int(rep.game.turn) != 0:
             return {"cards": None, "reason": "现在不是你的回合"}, 200
-        code = rep.agent.act(rep.cg)
+        with (_ACT_SEM or _NULL_SEM):
+            code = rep.agent.act(rep.cg)
         rep.snapshot_stats()
         cards = list(fast.code_to_cards(code, rep.game.hand_ids(0)))
     return {"cards": cards}, 200
@@ -450,10 +469,11 @@ def do_decide(p: dict):
     try:
         mode = str(p.get("mode", "hybrid")).lower()
         engine = PROD_MODES.get(mode, "c")
-        if engine == "c":
-            out = bot_server._decide(p)                 # 官方实现（hybrid）
-        else:
-            out = _decide_with_engine(p, engine=engine)  # dual: 残局数值计分接力
+        with (_ACT_SEM or _NULL_SEM):
+            if engine == "c":
+                out = bot_server._decide(p)                 # 官方实现（hybrid）
+            else:
+                out = _decide_with_engine(p, engine=engine)  # dual: 残局数值计分接力
         out["mode"] = "hybrid" if engine == "c" else mode
         out["engine"] = engine
         try:
@@ -551,7 +571,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "agent": "prod",
                             "productionModel": "ckpt/policy_a2c_final56.pt",
                             "modes": sorted(PROD_MODES),
-                            "botRoot": str(BOT_ROOT), "sessions": n, "v": 6,
+                            "botRoot": str(BOT_ROOT), "sessions": n, "v": 7,
+                            "maxSessions": MAX_SESSIONS,
+                            "liveSessions": sum(1 for x in SESSIONS.values()
+                                                if not getattr(x.game, "finished", False)),
                             "productionConfig": prod_config_info(),
                             "netProbe": net_probe(),
                             "assets": verify_assets()})
@@ -613,6 +636,60 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": str(e), "tb": traceback.format_exc()[-1500:]}, 500)
 
 
+def preflight():
+    """启动预检：生产模型必须加载成功（不降级），并预热一次，避免首个请求慢。"""
+    t0 = time.time()
+    try:
+        fb = bot_server._QFB()
+    except Exception as e:
+        print(f"[bridge] FATAL 生产模型加载失败：{type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        sys.exit(1)
+    if getattr(fb, "use_x", False) is not True:
+        print("[bridge] FATAL final56 未加载成功（pdk 内部回退旧网络）——不降级，拒绝启动",
+              file=sys.stderr, flush=True)
+        sys.exit(1)
+    print(f"[bridge] production model READY: {net_info(fb)} ({time.time()-t0:.1f}s)", flush=True)
+
+
+def restore_sessions():
+    """跨重启恢复：把仍标记 live 的对局按动作历史重建为会话（同一 sid/编号），
+    这样重启（部署/升级）不会打断正在进行的对局。"""
+    global RESTORING
+    n = 0
+    for f in REPLAY_DIR.glob("*.json"):
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not d.get("live"):
+            continue
+        sid = str(d.get("sid") or f.stem)
+        if sid in SESSIONS:
+            continue
+        try:
+            s = Shadow(d["hands"], d.get("kitty", []), d.get("leader", 0),
+                       d.get("opts", {}), d.get("mode", "hybrid"), sid=sid,
+                       reuse_no=d.get("no"), reuse_file=f.name)
+            s.restoring = True                       # 重放期间不写盘
+            try:
+                for code in d.get("codes", []):
+                    s._apply(code)
+            finally:
+                s.restoring = False
+            if s.game.finished:
+                write_replay(s, live=False)          # 恢复时才发现已结束 -> 补写终局
+                continue
+            write_replay(s, live=True)               # 重放完成后写一次
+            with LOCK:
+                SESSIONS[sid] = s
+            n += 1
+        except Exception as e:
+            print(f"[bridge] 恢复会话 {sid} 失败：{type(e).__name__}: {e}", file=sys.stderr, flush=True)
+    RESTORING = False
+    if n:
+        print(f"[bridge] restored {n} live session(s) across restart", flush=True)
+
+
 class BridgeServer(ThreadingHTTPServer):
     # Linux 需要 SO_REUSEADDR 以避免 TIME_WAIT 阻止重启；Windows 关闭以防双实例抢连接。
     allow_reuse_address = (os.name != 'nt')
@@ -624,8 +701,13 @@ def main():
     ap.add_argument("--bot-root", default=str(DEFAULT_BOT_ROOT))
     args = ap.parse_args()
 
+    global _ACT_SEM
+    _ACT_SEM = threading.Semaphore(max(2, (os.cpu_count() or 2)))
+    preflight()                                   # 不降级：模型未就绪直接退出（systemd 会拉起并留痕）
+    cleanup_stale_live()                          # 先清理超时僵尸局，只恢复真正在进行的对局
     srv = BridgeServer(("127.0.0.1", args.port), Handler)
     print(f"AI bridge on http://127.0.0.1:{args.port}  (bot root: {BOT_ROOT})", flush=True)
+    threading.Thread(target=restore_sessions, daemon=True).start()   # 端口先就绪，会话后台恢复
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

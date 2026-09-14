@@ -521,9 +521,15 @@ function scheduleBridgeRecover() {
     if (bridge.ready || bridge.initing || bridge.syncing || !bridge.initHands) return;
     await bridgeResync();
     if (bridge.ready) {
-      toast('已重新连上 AI 服务（' + (bridge.no ? '本局 ' + bridge.no : '') + '）', 2200);
       clearInterval(bridgeRecoverTimer); bridgeRecoverTimer = null;
-      if (S.screen === 'game') render();
+      if (S.aiBlocked) {                       // 自动恢复：撤下暂停并继续对局（无需用户操作）
+        S.aiBlocked = false; S.aiErrorMsg = '';
+        hideModal();
+        toast('AI 服务已自动恢复，继续对局（' + (bridge.no ? '本局 ' + bridge.no : '') + '）', 2400);
+        if (S.screen === 'game') { render(); beginTurn(); }
+      } else if (S.screen === 'game') {
+        render();
+      }
     }
   }, 6000);
 }
@@ -538,7 +544,8 @@ async function bridgeResync() {
       hands: bridge.initHands, kitty: bridge.initKitty || [],
       leader: S.roundLeader, opts: bridgeOpts(),
       mode: bridge.mode === 'dual' ? 'dual' : prodMode(),   // 重连保持本局模式
-      no: bridge.no, file: bridge.file,                     // 复用同编号/文件
+      no: bridge.no, file: bridge.file, sid: bridge.sid,     // 复用同编号/文件/会话
+
       actions: bridge.actions,
     }, 12000);
     bridge.sid = r.sid || null; bridge.ready = !!r.sid;
@@ -689,6 +696,7 @@ async function aiRetry() {
   if (ok) {
     S.aiBlocked = false; S.aiErrorMsg = '';
     toast('AI 服务已恢复，继续对局', 2200);
+    render();
     beginTurn();
   } else {
     aiError('仍然连不上 AI 服务（生产模型不可用）');
