@@ -714,8 +714,13 @@ async function onlinePoll() {
   ONLINE.pollBusy = true;
   try {
     const st = await onlineApi('/api/state?token=' + ONLINE.token, undefined, 12000);
-    if (st.error) { toast('在线状态获取失败：' + st.error); }
-    else { ONLINE.st = st; onlineApplyState(st); }
+    if (st.error) {
+      // 房间失效（过期/被清理/服务重启）：清理本地会话并回到大厅，避免卡在牌桌
+      toast('房间已失效（' + st.error + '），已退出到大厅', 3000);
+      quitToLobby();
+      return;
+    }
+    ONLINE.st = st; onlineApplyState(st);
   } catch {}                                         // 网络抖动：下一轮继续
   ONLINE.pollBusy = false;
   if (S.mode === 'online' && S.screen === 'game')
@@ -825,6 +830,7 @@ async function decideHint(seat) {
       my_hand: hand.map(toBotCard),
       opp_n: S.hands[1 - seat].length,
       trick, history: moves,
+      mode: prodMode(),                  // 与首页「AI 打法」一致（hybrid 胜率 / dual 净分）
     }, 45000);
     if (!r || r.fallback || !Array.isArray(r.move)) return null;
     if (r.move.length === 0) {
@@ -1194,7 +1200,7 @@ function render() {
   $('opp-count').textContent = S.hands[opp].length;
   const oppTags = [];
   if (S.mode === 'ai') oppTags.push('<span class="tag ai">' +
-    (S.bridgeMode ? 'AI·生产/' + (bridge.mode === 'dual' ? 'dual积分' : 'hybrid胜率') : 'AI·内置') + '</span>');
+    (S.bridgeMode ? 'AI·' + (bridge.mode === 'dual' ? '净分优先' : '胜率优先') : 'AI·内置') + '</span>');
   else oppTags.push('<span class="tag human">真人</span>');
   $('opp-tags').innerHTML = oppTags.join('');
   $('seat-opp').classList.toggle('turn', S.turn === opp && S.phase === 'playing');
@@ -1416,7 +1422,7 @@ function humanPass() {
 async function showHint() {
   const me = myTurnHuman();
   if (me < 0 || !hasHintRight(me)) return;
-  let p = null, src = '深度模型';
+  let p = null, src = '深度模型·' + (prodMode() === 'dual' ? '净分优先' : '胜率优先');
   const showWaiting = (txt) => {
     $('hint-bar').classList.remove('hidden');
     $('hint-text').textContent = txt;
@@ -1439,7 +1445,7 @@ async function showHint() {
   }
   if (p && p.pass) {                                   // 深度建议：不出（当前被压且无解）
     S.selected = new Set(); S.hints = []; S.hintIdx = -1;
-    $('hint-text').innerHTML = '建议<b>[深度模型]</b>：不出（当前无合法压制）';
+    $('hint-text').innerHTML = '建议<b>[' + src + ']</b>：不出（当前无合法压制）';
     render();
     return;
   }

@@ -342,12 +342,76 @@ def do_suggest(sid: str):
 def do_decide(p: dict):
     """无状态单步决策（pdk-ai 生产内核原生接口），供双真人模式的深度提示使用。
 
+    支持可选 "mode": "hybrid"|"dual" 与生产双模式对齐（默认 hybrid=生产配置）。
     失败返回 fallback:true，前端回退内置提示。
     """
     try:
-        return bot_server._decide(p), 200
+        mode = str(p.get("mode", "hybrid")).lower()
+        engine = PROD_MODES.get(mode, "c")
+        if engine == "c":
+            out = bot_server._decide(p)                 # 官方实现（hybrid）
+        else:
+            out = _decide_with_engine(p, engine=engine)  # dual: 残局数值计分接力
+        out["mode"] = "hybrid" if engine == "c" else mode
+        out["engine"] = engine
+        return out, 200
     except Exception as e:
         return {"error": str(e), "fallback": True}, 200
+
+
+def _decide_with_engine(payload: dict, engine: str) -> dict:
+    """与生产 _decide 同源，仅 SolverAgent 的 engine 可选（dual=残局数值计分）。"""
+    from pdk.belief import Belief, enumerate_hands
+    from pdk.core import COPIES, N_RANKS, rank_of
+    from pdk.agents import SolverAgent
+
+    my_ids = payload.get("my_hand") or []
+    opp_n = int(payload.get("opp_n", 0))
+    trick = payload.get("trick")
+    history = payload.get("history") or []
+    if not my_ids or opp_n < 0:
+        raise ValueError("my_hand 与 opp_n 必填")
+    my_cnt = [0] * N_RANKS
+    for c in my_ids:
+        my_cnt[rank_of(c)] += 1
+    played_me = [0] * N_RANKS
+    played_opp = [0] * N_RANKS
+    pass_events = []
+    for h in history:
+        seat = h.get("seat")
+        mv = h.get("move") or []
+        tgt = played_me if seat == 0 else played_opp
+        for c in mv:
+            tgt[rank_of(c)] += 1
+        if not mv and seat == 1 and h.get("pass_on"):
+            pass_events.append(tuple(h["pass_on"]))
+    unseen = [COPIES[r] - my_cnt[r] - played_me[r] - played_opp[r] for r in range(N_RANKS)]
+    if any(u < 0 for u in unseen) or sum(unseen) < opp_n:
+        raise ValueError("history 与手牌/对手张数不一致")
+    belief = Belief(my_cnt, opp_n, bot_server.CFG)
+    belief.rows = enumerate_hands(unseen, opp_n)
+    import numpy as np
+    belief.weights = np.ones(len(belief.rows), dtype=np.float64)
+    belief.opp_n = opp_n
+    for t4 in pass_events:
+        belief.update_pass(t4)
+    ag = SolverAgent(bot_server._QFB(), bot_server.CFG, total_threshold=28,
+                     max_rows=400000, engine=engine)
+    ag.new_game(0, my_cnt, [0] * N_RANKS)
+    ag.belief = belief
+    ag.oracle_cnt = None
+    world = belief.rows[0].tolist() if len(belief.rows) else [0] * N_RANKS
+    t4 = tuple(trick) if trick else None
+    cg = fast.CGame(my_cnt, world, 0, bot_server.CFG)
+    if t4 is not None:
+        cg.g.trick[0], cg.g.trick[1] = t4[0], t4[1]
+        cg.g.trick[2], cg.g.trick[3] = t4[2], t4[3]
+    else:
+        cg.g.trick[0] = 255
+    legal = cg.legal()
+    mv_code = ag.act(cg)
+    cards = list(fast.code_to_cards(mv_code, sorted(my_ids))) if mv_code else []
+    return {"move": cards, "pass": mv_code == 0, "legal_count": len(legal)}
 
 
 class Handler(BaseHTTPRequestHandler):
