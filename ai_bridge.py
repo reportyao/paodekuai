@@ -136,10 +136,15 @@ def save_replay(sid: str, s: Shadow):
     if getattr(s, "saved", False) or not s.game.finished:
         return
     payload = {
-        "version": 1, "source": "ai_bridge", "sid": sid,
+        "version": 2, "source": "ai_bridge", "sid": sid,
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "names": ["human", "ai"], "mode": getattr(s, "prod_mode", "hybrid"),
+        "net": getattr(s, "net", ""),
+        "humanSeat": 0,                       # 座位0 = 真人，座位1 = AI
         "hands": s.init_payload["hands"], "kitty": s.init_payload.get("kitty", []),
         "leader": s.init_payload["leader"], "opts": s.init_payload["opts"],
+        # moves: 每一手的完整明细（牌 id 可直接读；combo.ptype 0单1对2连对3三4三带二5三带一6飞机7顺子8炸弹9四带三）
+        "moves": getattr(s, "moves_detail", []),
         "codes": s.codes, "winner": s.game.winner, "scores": list(s.game.scores or (0, 0)),
     }
     (REPLAY_DIR / f"{sid}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -172,6 +177,7 @@ class Shadow:
         self.ai_seat = 1
         self.agent.new_game(self.ai_seat, list(self.game.cnt[self.ai_seat]))
         self.codes = []
+        self.moves_detail = []
         self.init_payload = {"hands": [h0, h1], "kitty": k, "leader": leader, "opts": opts}
         self.bad = False                     # 影子失效 -> 通知网页版降级
         self.lock = threading.Lock()
@@ -181,6 +187,19 @@ class Shadow:
         trick_before = (None if self.cg.g.trick[0] == 255
                         else tuple(self.cg.g.trick))
         seat_abs = int(self.game.turn)
+        # 复盘用明细：解码成具体牌 id + 牌型（落子前手牌完整，解码可靠）
+        if code:
+            try:
+                cards = list(fast.code_to_cards(code, self.game.hand_ids(seat_abs)))
+            except Exception:
+                cards = []
+            pat = fast.classify_code(code, False, self.cfg) or fast.classify_code(code, True, self.cfg)
+            combo = ({"ptype": int(pat.ptype), "main": pat.main,
+                      "len": pat.length, "nc": pat.nc} if pat else None)
+        else:
+            cards, combo = [], None
+        self.moves_detail.append({"ply": len(self.moves_detail) + 1, "seat": seat_abs,
+                                  "cards": cards, "combo": combo, "pass": code == 0})
         for ag in [self.agent]:
             ag.observe(seat_abs, code, trick_before)
         try:

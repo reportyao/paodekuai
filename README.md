@@ -85,6 +85,27 @@ ls -t /home/ubuntu/paodekuai/data/replays/*.json | head   # 最新对局
 python3 -m json.tool "$(ls -t /home/ubuntu/paodekuai/data/replays/*.json | head -1)"
 ```
 
+## 对局记录 / 复盘（供 AI 读取）
+
+所有对局以**完整、自包含**的 JSON 落盘（无需解码即可读牌面），并附复盘工具 `replay_report.py`：
+
+| 目录 | 内容 |
+|---|---|
+| `data/replays/*.json` | **人机局**：座位0=你、座位1=AI，含双方初始手牌、扣底、每一手牌面/牌型、胜负比分、使用的模式与网络 |
+| `data/online/*.json` | **在线真人局**：房号、双方昵称、初始手牌、扣底、每一手（牌面+牌型+剩余张数）、先手、结算与累计 |
+| `data/all_games.jsonl` | `export` 生成的全量合并文件，**一行一局**，可直接整份喂给 AI |
+
+每手记录字段：`ply`(第几手) `seat`(座位) `cards`(牌 id 列表，过牌为空) `combo`(牌型: ptype/main/len/nc) `pass` `pass_on`(被过的牌型) `handAfter`(出牌后剩余张数)。
+牌 id：点数 = `id>>2`（0=3 … 11=A，12=2），花色 = `id&3`（0♠1♥2♣3♦）；ptype：0单 1对 2连对 3三张 4三带二 5三带一 6飞机 7顺子 8炸弹 9四带三。
+
+```bash
+python3 replay_report.py list          # 列出全部对局
+python3 replay_report.py stats         # 统计（局数/胜率）
+python3 replay_report.py latest        # 最新一局完整复盘（含每手牌面）
+python3 replay_report.py show data/online/xxxx-r1-....json
+python3 replay_report.py export        # 合并为 data/all_games.jsonl（AI 直读）
+```
+
 ## 对局记录 / 复盘
 
 - 每局结束自动写入浏览器本地 `localStorage`（`pdk_replays_v1`，最多保留 100 局），无需手动保存。

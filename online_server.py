@@ -34,7 +34,7 @@ if not BOT_ROOT.exists():
 if str(BOT_ROOT) not in sys.path:
     sys.path.insert(0, str(BOT_ROOT))
 
-from pdk.core import Config, DECK  # noqa: E402
+from pdk.core import Config, DECK, classify  # noqa: E402
 from pdk.engine import Game, counts_of_ids  # noqa: E402
 from pdk import fast  # noqa: E402
 
@@ -50,7 +50,7 @@ def save_round_replay(room: "Room"):
     if room.roundResult is None:
         return
     payload = {
-        "version": 1, "source": "online_room",
+        "version": 2, "source": "online_room",
         "code": room.code, "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "names": list(room.names), "round": room.roundNo, "rounds": room.rounds,
         "opts": room.opts,
@@ -160,11 +160,20 @@ class Room:
                 return {"error": "不合法的出牌"}
         trick_before = (None if g.trick is None else
                         (int(g.trick[0]), int(g.trick[1]), int(g.trick[2]), int(g.trick[3])))
+        combo = None
+        if cards:
+            is_last = (g.hand_count(seat) - len(cards) == 0)   # 本手是否出完（收尾豁免）
+            pat = classify(list(cards), is_last, self.cfg)     # 入参为牌 id 列表
+            combo = ({"ptype": int(pat.ptype), "main": pat.main,
+                      "len": pat.length, "nc": pat.nc} if pat else None)
         g.play(code)
         self.cg_step_safe(code)
-        self.roundMoves.append({"seat": seat, "cards": list(cards) if cards else [],
+        self.roundMoves.append({"ply": len(self.roundMoves) + 1, "seat": seat,
+                                "cards": list(cards) if cards else [],
+                                "combo": combo,
                                 "pass": want_pass,
                                 "pass_on": trick_before if want_pass else None,
+                                "handAfter": g.hand_count(seat),
                                 "ts": time.time()})
         if not want_pass:
             self.playsMade[seat] += 1
