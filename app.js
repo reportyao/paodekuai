@@ -465,7 +465,7 @@ async function bridgeApi(path, body, timeoutMs = 15000) {
   } finally { clearTimeout(tm); }
 }
 async function bridgeHealth() {
-  try { const r = await bridgeApi('/health', undefined, 3000); return !!r.ok; } catch { return false; }
+  try { const r = await bridgeApi('/health', undefined, 8000); return !!r.ok; } catch { return false; }   // 跨海链路：3s 太短会误判为未连接
 }
 function bridgeOpts() {
   return { sanzhang: S.opts.sanzhang, nobomb: S.opts.nobomb, red10: S.opts.red10, four3: S.opts.four3 };
