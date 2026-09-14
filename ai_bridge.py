@@ -19,7 +19,8 @@
   POST /action  {sid, seat, cards}  -> 镜像人类动作（cards=[] 过牌）-> {ok, finished}
   POST /act     {sid}               -> AI(座位1)出一手并同步 -> {cards:[id...], finished}
   POST /suggest {sid}               -> 座位0的建议（重放决策，不落子）-> {cards:[id...]}
-  各端点失败时尽量返回 {"fallback": true}，网页版据此降级到内置贪心 AI。
+  不降级策略：任何失败都返回明确错误（4xx/5xx + error 文案），
+  网页版会暂停并提示重试，绝不静默换成内置贪心 AI。
 
 牌 id 语义与 pdk_ai 相同: id = (rankIdx<<2)|suit, rankIdx 0=3..11=A, 12=2(仅黑桃)。
 """
@@ -156,6 +157,10 @@ def build_prod_agent(engine: str):
     """
     from pdk.agents import SolverAgent
     fb = bot_server._QFB()                     # 生产 fallback: final56 + R3
+    if getattr(fb, "use_x", False) is not True:
+        # 不降级策略：宁可报错，也不用旧 DMC 网络糊弄玩家
+        raise RuntimeError("生产模型 ckpt/policy_a2c_final56.pt 未加载成功"
+                           "（检测到 pdk 内部回退到旧网络）——按不降级策略拒绝服务")
     agent = SolverAgent(fb, bot_server.CFG, total_threshold=28,
                         max_rows=400000, engine=engine)
     return agent, ("hybrid" if engine == "c" else engine), net_info(fb)
@@ -390,7 +395,7 @@ def do_act(sid: str):
     s = get_sess(sid)
     with s.lock:
         if s.bad:
-            return {"fallback": True}, 200
+            return {"error": "影子牌局已失效（本局不再降级，请重开）"}, 500
         if s.game.finished:
             return {"finished": True}, 200
         if int(s.game.turn) != s.ai_seat:
@@ -414,8 +419,10 @@ def do_suggest(sid: str):
     """给座位0的建议：重放整局后让内核代座位0决策，不落子。"""
     s = get_sess(sid)
     with s.lock:
-        if s.bad or s.game.finished:
-            return {"fallback": True}, 200
+        if s.bad:
+            return {"error": "影子牌局已失效（不降级，请重开本局）"}, 500
+        if s.game.finished:
+            return {"cards": None, "reason": "本局已结束"}, 200
         init = s.init_payload
         codes = list(s.codes)
     rep = Shadow(init["hands"], init.get("kitty", []), init["leader"], init["opts"], getattr(s, "prod_mode", "hybrid"))
@@ -424,8 +431,10 @@ def do_suggest(sid: str):
         rep.agent.new_game(0, list(rep.game.cnt[0]))
         for code in codes:
             rep._apply(code)
-        if rep.game.finished or int(rep.game.turn) != 0:
-            return {"fallback": True}, 200
+        if rep.game.finished:
+            return {"cards": None, "reason": "本局已结束"}, 200
+        if int(rep.game.turn) != 0:
+            return {"cards": None, "reason": "现在不是你的回合"}, 200
         code = rep.agent.act(rep.cg)
         rep.snapshot_stats()
         cards = list(fast.code_to_cards(code, rep.game.hand_ids(0)))
@@ -436,7 +445,7 @@ def do_decide(p: dict):
     """无状态单步决策（pdk-ai 生产内核原生接口），供双真人模式的深度提示使用。
 
     支持可选 "mode": "hybrid"|"dual" 与生产双模式对齐（默认 hybrid=生产配置）。
-    失败返回 fallback:true，前端回退内置提示。
+    失败直接返回 500 错误（不降级）；仅“不适用”时返回 cards:null + reason。
     """
     try:
         mode = str(p.get("mode", "hybrid")).lower()
@@ -453,7 +462,7 @@ def do_decide(p: dict):
             pass
         return out, 200
     except Exception as e:
-        return {"error": str(e), "fallback": True}, 200
+        return {"error": f"decide 失败（不降级）：{e}"}, 500
 
 
 def _decide_with_engine(payload: dict, engine: str) -> dict:

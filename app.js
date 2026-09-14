@@ -24,6 +24,7 @@ const S = {
   awaiting: null,                              // 热座：等待确认看牌的座位
   selected: new Set(), hints: [], hintIdx: -1,
   bridgeMode: false, roundLeader: 0,           // AI 机器人桥接状态 / 本局先手
+  aiBlocked: false, aiErrorMsg: '',             // 不降级：AI 异常时暂停本局
   revealOpp: false,                            // 测试：实时明牌对手手牌
   replay: null, replayArchive: [],
   aiTimer: null,
@@ -426,7 +427,7 @@ function aiCandidates(seat) {
 const AI_BRIDGE = location.protocol.startsWith('http')
   ? location.origin + '/ai'
   : 'http://127.0.0.1:8766';
-const bridge = { sid: null, ready: false, mode: '', actions: [], actPending: false, initHands: null, initKitty: null, syncing: false, initing: false, waiters: [], no: null, file: null };
+const bridge = { sid: null, ready: false, mode: '', actions: [], actPending: false, initHands: null, initKitty: null, syncing: false, initing: false, waiters: [], no: null, file: null, lastErr: '' };
 
 function toBotCard(c) {
   if (c.r === 14) return 44 + ([1, 2, 3].indexOf(c.s)); // pdk_ai的三张A槽位: 44,45,46
@@ -501,7 +502,8 @@ async function bridgeNewRound() {
       setBridgeMode(true);
     } else {
       setBridgeMode(false);
-      toast('AI 服务未就绪，本局先用内置 AI（后台会自动重连）', 2600);
+      toast('AI 服务未就绪：已暂停对局，不降级（点弹窗里的「重试连接」）', 3000);
+      aiError(bridge.lastErr || 'AI 服务未连接（生产模型不可用）');
       scheduleBridgeRecover();
     }
   } catch { setBridgeMode(false); }
@@ -527,7 +529,8 @@ function scheduleBridgeRecover() {
 }
 async function bridgeResync() {
   // 影子失同步：用本局初始发牌 + 完整动作历史重建会话（并发保护）
-  if (bridge.syncing || !bridge.initHands) return;
+  if (bridge.syncing) return false;
+  if (!bridge.initHands) return false;
   bridge.syncing = true;
   bridge.ready = false;
   try {
@@ -539,6 +542,7 @@ async function bridgeResync() {
       actions: bridge.actions,
     }, 12000);
     bridge.sid = r.sid || null; bridge.ready = !!r.sid;
+    if (r && r.error) bridge.lastErr = r.error;
     if (bridge.ready) {
       bridge.no = r.no || bridge.no; bridge.file = r.file || bridge.file;
       bridge.mode = r.mode || bridge.mode;
@@ -546,8 +550,9 @@ async function bridgeResync() {
       setBridgeMode(true);                                  // 标签切回“AI·胜率/净分优先”
       if (bridgeRecoverTimer) { clearInterval(bridgeRecoverTimer); bridgeRecoverTimer = null; }
     }
-  } catch { bridge.ready = false; }
+  } catch (e) { bridge.ready = false; bridge.lastErr = String(e); }
   finally { bridge.syncing = false; }
+  return bridge.ready;
 }
 async function bridgeMirror(seat, myCards) {
   // 历史无条件记录（重放数据源）；/act 已在桥内落子的只记录不重发
@@ -582,11 +587,13 @@ function cardsFromBridge(ids, seat) {
 }
 
 async function bridgeSuggestForTurn() {
-  if (!bridge.ready) return null;
+  if (!bridge.ready) return { error: bridge.lastErr || 'AI 服务未连接（不提供内置建议）' };
   try {
     const r = await bridgeApi('/suggest', { sid: bridge.sid }, 45000);   // 残局 PIMC 偶发较慢，放宽到45s
-    if (!r || r.fallback) return null;
-    if (Array.isArray(r.cards) && r.cards.length === 0) {
+    if (r && r.error) return { error: r.error };
+    if (r && r.reason) return { error: r.reason };
+    if (!r || !Array.isArray(r.cards)) return { error: 'AI 未返回建议（不降级）' };
+    if (r.cards.length === 0) {
       // 深度建议：不出。仅当本地确认无解时才采纳（有牌必打保险）
       const legal = legalPlays(S.hands[S.turn], { last: S.last ? S.last.combo : null, oppCount: S.hands[1 - S.turn].length }, S.opts);
       return legal.length === 0 ? { pass: true } : null;
@@ -595,7 +602,7 @@ async function bridgeSuggestForTurn() {
     if (!cards) { bridgeResync(); return null; }         // 建议牌不在手中 -> 影子失步
     if (!validateSelection(S.turn, cards).ok) { bridgeResync(); return null; }  // 全规则校验
     return { cards, combo: analyzeShape(cards) };
-  } catch { return null; }
+  } catch (e) { return { error: 'AI 提示请求失败：' + e }; }
 }
 function setBridgeMode(on) {
   if (S.bridgeMode !== on) { S.bridgeMode = on; if (S.screen === 'game') render(); }
@@ -615,10 +622,10 @@ function setBridgeMode(on) {
  *   legal: [{cards, combo}],    // 全部合法候选（legalPlays 的结果）
  *   opts: {...},                // 本局规则开关
  * }
- * 返回值：
- *   - 牌数组：必须与 legal 中某个候选完全一致（按牌 id 集合匹配），否则回退内置 AI；
- *   - null / []：表示「不出」（自由出牌时无效，会回退内置 AI）；
- *   - 同步或 Promise 均可；抛异常也会回退内置贪心 AI，保证牌局不中断。
+ * 返回值（不降级策略）：
+ *   - 牌数组：必须与 legal 中某个候选完全一致（按牌 id 集合匹配），否则视为模型异常；
+ *   - []：表示「不出」，需本地确认确实无解，否则视为模型异常；
+ *   - null / 抛异常：一律视为 AI 服务异常 —— 暂停对局并弹窗报错，绝不使用内置 AI 代打。
  */
 let externalAI = null;                                   // (ctx) => cards|null，由 pdkRegisterAI 注册
 function pdkRegisterAI(fn) { externalAI = fn; }
@@ -640,24 +647,52 @@ async function aiMove() {
     try {
       const ret = await externalAI(ctx);
       if (Array.isArray(ret) && ret.length === 0) {
-        // 模型明确选择过：externalAI 已确认本地无解（有牌必打双保险）
-        const localLegal = legalPlays(hand, { last: S.last ? S.last.combo : null, oppCount: S.hands[1 - seat].length }, S.opts);
-        if (ctx.last && !localLegal.length) { applyPass(seat); return; }
-        console.warn('[PdkAI] 模型要过但本地有解，改用内置出牌');
-      } else if (Array.isArray(ret)) {
-        cards = ret;                         // externalAI 已做精确映射 + validateSelection 校验
+        applyPass(seat);                     // 模型明确过牌（externalAI 已确认本地无解）
+        return;
       }
-      // ret == null：桥不可用/失步/异常 —— 一律走内置兜底，绝不当作过牌
+      if (Array.isArray(ret)) cards = ret;   // externalAI 已做精确映射 + validateSelection 校验
     } catch (e) {
-      console.error('[PdkAI] 模型调用失败，回退内置 AI：', e);
+      console.error('[PdkAI] 生产模型调用失败：', e);
     }
   }
-  if (!cards) {                                          // 内置贪心 AI 兜底
-    const cands = aiCandidates(seat);
-    if (!cands.length) { applyPass(seat); return; }
-    cards = cands[0].p.cards;
+  if (!cards) {
+    // 不降级：AI 服务异常 -> 暂停本局并明确报错，绝不代打
+    aiError(S.aiErrorMsg || 'AI 服务未能给出走法（生产模型不可用）');
+    return;
   }
   applyPlay(seat, cards);                                // 镜像统一在 applyPlay/applyPass 里做
+}
+
+/* 不降级错误处理：暂停对局 + 明确报错 + 重试 */
+function aiError(msg) {
+  S.aiErrorMsg = msg;
+  S.aiBlocked = true;
+  clearTimeout(S.aiTimer);
+  $('m-title').textContent = '⛔ AI 服务异常（已暂停，不降级）';
+  $('m-list').innerHTML =
+    `<div class="res-line hl"><span class="v">${String(msg).replace(/[<>]/g, '')}</span></div>` +
+    `<div class="res-line"><span class="k">当前状态</span><span class="v">对局已暂停：电脑<b>不会</b>用内置 AI 代打；恢复后自动继续</span></div>` +
+    `<div class="res-line"><span class="k">诊断</span><span class="v">` +
+    `桥：${bridge.ready ? '已连接' : '未连接'}${bridge.no ? ' ｜ 本局 ' + bridge.no : ''}` +
+    `${bridge.lastErr ? ' ｜ 最近错误：' + String(bridge.lastErr).slice(0, 120) : ''}</span></div>`;
+  $('btn-next').classList.add('hidden');
+  $('btn-rematch').classList.add('hidden');
+  $('btn-back-lobby').classList.remove('hidden');
+  $('btn-ai-retry').classList.remove('hidden');
+  $('modal').classList.remove('hidden');
+  scheduleBridgeRecover();
+  render();
+}
+async function aiRetry() {
+  hideModal();
+  const ok = await bridgeResync();
+  if (ok) {
+    S.aiBlocked = false; S.aiErrorMsg = '';
+    toast('AI 服务已恢复，继续对局', 2200);
+    beginTurn();
+  } else {
+    aiError('仍然连不上 AI 服务（生产模型不可用）');
+  }
 }
 /* ================= 在线双人对战（房间制，服务器权威 + 轮询） ================= */
 const ONLINE = {
@@ -867,7 +902,8 @@ async function decideHint(seat) {
       trick, history: moves,
       mode: prodMode(),                  // 与首页「AI 打法」一致（hybrid 胜率 / dual 净分）
     }, 45000);
-    if (!r || r.fallback || !Array.isArray(r.move)) return null;
+    if (r && r.error) return { error: r.error };
+    if (!r || !Array.isArray(r.move)) return { error: 'AI 未返回建议（不降级）' };
     if (r.move.length === 0) {
       const legal = legalPlays(hand, { last: S.last ? S.last.combo : null, oppCount: S.hands[1 - seat].length }, S.opts);
       return legal.length === 0 ? { pass: true } : null;
@@ -952,7 +988,8 @@ function startMatch() {
   if (S.mode === 'ai') { S.names = ['我', '电脑']; S.avatars = ['🙂', '🤖']; }
   else { S.names = ['玩家一', '玩家二']; S.avatars = ['🧑', '👦']; }
   bridgeHealth().then(ok => {
-    if (S.mode === 'ai') toast(ok ? '🤖 已接入生产版 AI 机器人（hybrid / dual 双模式）' : 'AI 机器人未连接，电脑使用内置 AI', 3000);
+    if (S.mode === 'ai') toast(ok ? '🤖 已接入生产版 AI 机器人（hybrid / dual 双模式）'
+                                   : '⛔ AI 服务未连接：对局将暂停并提示重试（不降级）', 3000);
   });
   showScreen('game');
   nextRound();
@@ -1002,7 +1039,14 @@ function beginTurn() {
   }
   if (S.turn === 1) {                                    // AI
     render();
-    const startAI = () => { S.aiTimer = setTimeout(aiMove, 600 + randInt(500)); };
+    if (S.mode === 'ai' && S.aiBlocked) return;           // 暂停中：不自动行动
+    const startAI = () => {
+      if (S.mode === 'ai' && !bridge.ready) {             // 不降级：桥不可用 -> 报错暂停
+        aiError(bridge.lastErr || 'AI 服务未连接（生产模型不可用）');
+        return;
+      }
+      S.aiTimer = setTimeout(aiMove, 600 + randInt(500));
+    };
     if (S.mode === 'ai' && bridge.initing) bridge.waiters.push(startAI);  // 等桥初始化完成，消除先手竞态
     else startAI();
   } else render();
@@ -1421,8 +1465,9 @@ function render() {
   $('opp-count').textContent = S.hands[opp].length;
   const oppTags = [];
   if (S.mode === 'ai') oppTags.push('<span class="tag ai">' +
-    (S.bridgeMode ? 'AI·' + (bridge.mode === 'dual' ? '净分优先' : '胜率优先')
-                  : ('AI·内置' + (bridge.initHands && S.mode === 'ai' ? '·重连中' : ''))) + '</span>');
+    (S.aiBlocked ? 'AI·已暂停（待重试）'
+                 : (S.bridgeMode ? 'AI·' + (bridge.mode === 'dual' ? '净分优先' : '胜率优先')
+                                 : 'AI·未连接（已暂停）')) + '</span>');
   else oppTags.push('<span class="tag human">真人</span>');
   $('opp-tags').innerHTML = oppTags.join('');
   $('seat-opp').classList.toggle('turn', S.turn === opp && S.phase === 'playing');
@@ -1603,7 +1648,7 @@ async function refreshAIVersion() {
       (isFallback ? ' <span class="bad">⚠ 已回退旧网络</span>' : ' <span class="ok">在线</span>');
   } catch {
     el.classList.add('warn');
-    el.innerHTML = 'AI 模型：<b>内置贪心</b>（AI 服务未连接，此时电脑较弱、无深度提示）';
+    el.innerHTML = 'AI 模型：<b>未连接</b> ⛔ AI 服务不可用 —— 按“不降级”策略，对局会暂停并提示重试（不会用内置 AI 代打）';
   }
 }
 
@@ -1642,6 +1687,7 @@ function initLobby() {
     await openReview(RV.no);
     if (RV.total > 0) { RV.step = RV.total; renderReview(); }
   });
+  $('btn-ai-retry').addEventListener('click', aiRetry);
   $('btn-review-cur').addEventListener('click', () => reviewCurrentGame());
   $('btn-review-prev').addEventListener('click', () => reviewPreviousGame());
   $('btn-review-close').addEventListener('click', () => {
@@ -1695,10 +1741,8 @@ async function showHint() {
     // 先手开局时桥可能仍在初始化（跨海约1~2秒）：等它完成再决策
     for (let i = 0; i < 60 && bridge.initing; i++) await new Promise(r => setTimeout(r, 200));
     if (bridge.lastMirror) { try { await bridge.lastMirror; } catch {} }   // 等最后一手镜像落库，避免重放缺手
-    showWaiting(bridge.initing || !bridge.ready
-      ? 'AI 机器人未连接，使用内置建议…'
-      : '🤖 深度模型思考中…（残局求解可能需要几秒）');
-    p = await bridgeSuggestForTurn();                // 优先：AI 机器人深度模型
+    showWaiting('🤖 深度模型思考中…（残局求解可能需要几秒）');
+    p = await bridgeSuggestForTurn();                // 只走生产模型（不降级）
     $('btn-adopt').classList.remove('hidden');
   } else {
     // 热座（玩家一）/ 在线（双方）：pdk-ai 生产内核无状态 decide
@@ -1712,22 +1756,19 @@ async function showHint() {
     render();
     return;
   }
-  if (!p) {
-    const cands = aiCandidates(me);                    // 降级：内置贪心 AI
-    if (!cands.length) { toast('没有能管上的牌，请点「不出」'); return; }
-    S.hints = cands.slice(0, 6).map(x => x.p);
-    S.hintIdx = (S.hintIdx + 1) % S.hints.length;
-    p = S.hints[S.hintIdx];
-    src = '内置AI';
-  } else {
-    S.hints = [p]; S.hintIdx = 0;
+  if (!p || p.error) {                                 // 不降级：直接报错，不提供内置建议
+    $('hint-bar').classList.remove('hidden');
+    $('hint-text').innerHTML = '<b>AI 提示不可用</b>：' + String((p && p.error) || '未返回建议').replace(/[<>]/g, '');
+    S.selected = new Set(); render();
+    return;
   }
+  S.hints = [p]; S.hintIdx = 0;
   S.selected = new Set(p.cards.map(c => c.i));
   const hb = $('hint-bar');
   hb.classList.remove('hidden');
   $('hint-text').innerHTML = '建议<b>[' + src + ']</b> ' + comboName(p.combo) + '：<span class="hint-cards">' +
     p.cards.map(c => cardText(c)).join(' ') + '</span>' +
-    (src === '内置AI' ? '（第 ' + (S.hintIdx + 1) + '/' + S.hints.length + ' 个，再点提示切换）' : '');
+    '';
   render();
 }
 function quitToLobby() {
@@ -1749,9 +1790,9 @@ function init() {
   initLobby();
   refreshAIVersion();
   onlineRestore();   // 刷新后恢复进行中的在线对局
-  // AI 机器人回调：深度模型驱动 AI 座位。
-  // 关键一致性原则：桥内落了什么牌，网页就出什么牌（精确双射映射 + 全规则校验），
-  // 保证影子牌局永不失步；映射失败/校验失败立即重建影子并回退内置 AI。
+  // AI 机器人回调：只走生产模型（不降级）。
+  // 一致性：桥内落什么牌，网页就出什么牌（精确映射 + 全规则校验），保证影子牌局永不失步；
+  // 任何异常 -> 抛出，由 aiMove 统一暂停并报错（绝不用内置 AI 代打）。
   pdkRegisterAI(async (ctx) => {
     if (!bridge.ready) return null;
     try {
@@ -1769,9 +1810,9 @@ function init() {
       bridge.actPending = true;              // 桥内已落子：applyPlay 镜像时只记历史不重发
       return cards;
     } catch (e) {
-      console.warn('[PdkAI]', e && e.message);
-      bridgeResync();
-      return null;                           // 内置贪心兜底（自身保证有牌必打）
+      bridge.lastErr = String((e && e.message) || e);
+      console.warn('[PdkAI] 生产模型异常（不降级）：', bridge.lastErr);
+      throw e;                               // 交给 aiMove 暂停报错
     }
   });
   $('btn-play').addEventListener('click', humanPlay);
