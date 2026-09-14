@@ -84,7 +84,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 
 class Server(socketserver.ThreadingTCPServer):
-    allow_reuse_address = False   # 端口被占时报错可见，避免双实例抢连接
+    # Linux: 必须置 True —— 否则 TIME_WAIT 残留会让重启报 EADDRINUSE（端口却看着空闲）；
+    # Linux 上 SO_REUSEADDR 不允许两个存活监听，双实例仍会失败。
+    # Windows: 置 False —— SO_REUSEADDR 会允许双实例同时绑定抢连接。
+    allow_reuse_address = (os.name != 'nt')
 
 
 if __name__ == '__main__':

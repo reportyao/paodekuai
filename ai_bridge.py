@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import threading
 import time
@@ -58,57 +59,70 @@ from pdk.core import Config          # noqa: E402
 from pdk.engine import Game, counts_of_ids  # noqa: E402
 from pdk.fast import PASS_CODE       # noqa: E402
 
-# 生产双模式 (README「过夜全量判定·生产配置定版」):
-#   hybrid = solver28 + DMC-v1 fallback        —— 胜率优先 (生产配置)
-#   dual   = hybrid 接力, 小残局(<=14张)数值计分 —— 积分制净分优先
+# 生产双模式 (pdk-ai README「当前生产模型与部署清单」):
+#   生产模型 = ckpt/policy_a2c_final56.pt (A2C + 56维动作后特征)
+#   hybrid = SolverAgent(hybrid, threshold=28) + _QFB(final56) + 规则层 R0-R3 —— 胜率优先(生产配置)
+#   dual   = 同上但 SolverAgent(engine='dual', <=14张数值计分接力)      —— 积分制净分优先
 PROD_MODES = {"hybrid": "c", "dual": "dual"}
 
 
+def net_info(fb) -> str:
+    """当前 fallback 实际加载的网络（供 /health 明示接的是不是 final56）。"""
+    name = getattr(fb, "name", "?")
+    use_x = getattr(fb, "use_x", None)
+    if use_x is True:
+        return "a2c-final56(56x)"
+    if use_x is False:
+        return "dmc-v1(low feature)"
+    return name
+
+
+# pdk-ai README「部署四件套」md5（缺一不可）；Linux 的 .so 由 pdk_core.c 本地编译
+ASSET_MD5 = {
+    "ckpt/policy_a2c_final56.pt": "534dcca82ee60760a1a40c546a83e5f1",
+    "ckpt/qnet.pt": "4be2824a0f47c98be6fa8c80276d0777",
+    "c/pdk_core.c": "aefb96685e0dc8a164c60bc00388919a",
+}
+if os.name == "nt":
+    ASSET_MD5["c/pdk_core.dll"] = "f49c46e86313075df918caad4fa2f085"
+
+
+def verify_assets() -> dict:
+    """启动/健康检查时校验生产模型与 C 核心是否与 README 清单一致。"""
+    import hashlib
+    out = {"ok": True, "files": {}}
+    for rel, want in ASSET_MD5.items():
+        p = BOT_ROOT / rel
+        if not p.exists():
+            out["files"][rel] = "MISSING"
+            out["ok"] = False
+            continue
+        h = hashlib.md5(p.read_bytes()).hexdigest()
+        good = (h == want)
+        out["files"][rel] = "OK" if good else f"MD5={h} (want {want})"
+        if not good:
+            out["ok"] = False
+    if os.name != "nt":
+        so = BOT_ROOT / "c" / "pdk_core.so"
+        out["files"]["c/pdk_core.so"] = "OK" if so.exists() else "MISSING(需 gcc 构建)"
+        if not so.exists():
+            out["ok"] = False
+    return out
+
+
 def build_prod_agent(engine: str):
-    """按生产 server.build_ai 同源逻辑构建智能体, 仅 SolverAgent 的 engine 可选。
+    """按生产 server.build_ai() 同源构建智能体，只有 SolverAgent 的 engine 可选。
 
-    hybrid -> engine='c'   (布尔定胜负, 生产配置)
-    dual   -> engine='dual' (<=14张数值计分接力, 积分制备选)
-    fallback 均为 DMC-v1 (ckpt/qnet.pt), 与生产配置一致。
+    fallback 直接用官方 server._QFB() —— 即生产模型 final56
+    (273 obs + 56 维动作后特征) + R3 开局结构守护；checkpoint 缺失时它自己回退 DMC。
+    R0(一手走完)/R1(报单保权) 在 pdk/agents.py，R2(残局连续保权) 在 pdk/endgame_order.py，
+    均随 SolverAgent 无条件生效。
     """
-    import numpy as np  # noqa: F401
-    net = bot_server._dmc_net()
     from pdk.agents import SolverAgent
-
-    class _QFB:
-        name = "dmc-fallback"
-
-        def __init__(self, seed=0):
-            self.last = 0
-            self.opp_p = False
-            self.stats = {"activated": 0}
-
-        def new_game(self, seat, my_cnt, opp_cnt=None):
-            self.last, self.opp_p = 0, False
-
-        def observe(self, p, mv, t4):
-            if mv:
-                self.last, self.opp_p = mv, False
-            else:
-                self.opp_p = True
-
-        def act(self, cg):
-            import torch
-            legal = cg.legal()
-            if len(legal) == 1:
-                return legal[0]
-            from train.features import encode_obs, encode_move
-            obs = encode_obs(cg, self.last, self.opp_p)
-            mf = np.stack([encode_move(m) for m in legal])
-            ob = torch.from_numpy(np.repeat(obs[None, :], len(legal), 0))
-            mvt = torch.from_numpy(mf)
-            with torch.no_grad():
-                q = net(ob, mvt)
-            return legal[int(q.reshape(-1).argmax())]
-
-    agent = SolverAgent(_QFB(), bot_server.CFG, total_threshold=28,
+    fb = bot_server._QFB()                     # 生产 fallback: final56 + R3
+    agent = SolverAgent(fb, bot_server.CFG, total_threshold=28,
                         max_rows=400000, engine=engine)
-    return agent, ("hybrid" if engine == "c" else engine)
+    return agent, ("hybrid" if engine == "c" else engine), net_info(fb)
 
 
 SESSIONS: dict = {}
@@ -154,7 +168,7 @@ class Shadow:
         assert sorted(h0 + h1 + k) == sorted(bot_server.DECK), "两手牌+扣底必须恰好构成48张"
         self.game = Game(cfg=self.cfg, first_player=leader, hands=[h0, h1], kitty=k)
         self.cg = fast.CGame(counts_of_ids(h0), counts_of_ids(h1), leader, self.cfg)
-        self.agent, self.mode = build_prod_agent(engine)
+        self.agent, self.mode, self.net = build_prod_agent(engine)
         self.ai_seat = 1
         self.agent.new_game(self.ai_seat, list(self.game.cnt[self.ai_seat]))
         self.codes = []
@@ -330,8 +344,11 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/health":
                 with LOCK:
                     n = len(SESSIONS)
-                self._json({"ok": True, "agent": "prod", "modes": sorted(PROD_MODES),
-                            "botRoot": str(BOT_ROOT), "sessions": n, "v": 4})
+                self._json({"ok": True, "agent": "prod",
+                            "productionModel": "ckpt/policy_a2c_final56.pt",
+                            "modes": sorted(PROD_MODES),
+                            "botRoot": str(BOT_ROOT), "sessions": n, "v": 5,
+                            "assets": verify_assets()})
             elif u.path == "/legal":
                 from urllib.parse import parse_qs
                 q = parse_qs(u.query)
@@ -375,9 +392,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class BridgeServer(ThreadingHTTPServer):
-    # Windows 上 SO_REUSEADDR 会允许双实例同时绑同一端口（连接被旧实例抢走），
-    # 显式关掉：端口被占时新进程直接报错退出，问题可见。
-    allow_reuse_address = False
+    # Linux 需要 SO_REUSEADDR 以避免 TIME_WAIT 阻止重启；Windows 关闭以防双实例抢连接。
+    allow_reuse_address = (os.name != 'nt')
 
 
 def main():

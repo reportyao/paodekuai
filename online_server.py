@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import sys
 import threading
@@ -40,6 +41,32 @@ from pdk import fast  # noqa: E402
 ROOMS: dict = {}
 LOCK = threading.Lock()
 ROOM_TTL = 60 * 60 * 6          # 6 小时无活动清理
+REPLAY_DIR = Path(__file__).resolve().parent / "data" / "online"
+REPLAY_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def save_round_replay(room: "Room"):
+    """每局结束落盘真人 vs 真人对局（复盘/学习用）。"""
+    if room.roundResult is None:
+        return
+    payload = {
+        "version": 1, "source": "online_room",
+        "code": room.code, "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "names": list(room.names), "round": room.roundNo, "rounds": room.rounds,
+        "opts": room.opts,
+        "initialHands": [list(h) for h in room.initial],   # 双方初始手牌（pdk 牌 id）
+        "kitty": list(room.kitty),                          # 扣底 16 张
+        "firstPlayer": room.roundLeader,
+        "moves": list(room.roundMoves),                     # [{seat,cards(pdk id)|[],pass,pass_on,ts}]
+        "result": room.roundResult,
+        "total": list(room.total), "history": list(room.history),
+    }
+    fn = f"{room.code}-r{room.roundNo}-{int(time.time())}.json"
+    try:
+        (REPLAY_DIR / fn).write_text(json.dumps(payload, ensure_ascii=False, indent=2),
+                                     encoding="utf-8")
+    except OSError:
+        pass
 
 
 def build_cfg(o: dict) -> Config:
@@ -89,13 +116,15 @@ class Room:
                 self.start_round()
             return token, seat
 
-    def deal(self):
+    def deal(self, first_player=None):
         deck = list(DECK)
         random.SystemRandom().shuffle(deck)
         self.kitty = sorted(deck[:16])
         hands = [sorted(deck[16:32]), sorted(deck[32:48])]
-        self.game = Game(cfg=self.cfg, first_player=self.roundLeader,
+        # first_player=None: 引擎按黑桃3持有者定先（被扣底则随机），与规则一致
+        self.game = Game(cfg=self.cfg, first_player=first_player,
                          hands=[hands[0], hands[1]], kitty=self.kitty)
+        self.roundLeader = int(self.game.turn)
         self.initial = [hands[0], hands[1]]
         self.roundMoves = []
         self.playsMade = [0, 0]
@@ -105,15 +134,9 @@ class Room:
 
     def start_round(self):
         if self.roundNo == 0:
-            # 首局：先发牌才知道黑桃3在谁手 -> 直接发，引擎自带定先
-            self.roundLeader = 0
-            self.deal()
-            self.roundLeader = int(self.game.turn)   # 引擎按黑桃3定先
-            self.game.turn = self.roundLeader
-            self.roundLeader = self.roundLeader
+            self.deal(None)                     # 首局：黑桃3持有者先出
         else:
-            self.roundLeader = self.lastWinner if self.lastWinner is not None else 0
-            self.deal()
+            self.deal(self.lastWinner if self.lastWinner is not None else 0)
 
     # ---------- 动作 ----------
     def act(self, seat: int, cards: list, want_pass: bool):
@@ -176,6 +199,7 @@ class Room:
         }
         self.history.append({"round": self.roundNo, "winner": winner,
                              "rem": rem, "shut": shut, "delta": scores})
+        save_round_replay(self)                          # 真人对局落盘（复盘用）
 
     # ---------- 视角快照 ----------
     def state_for(self, seat: int) -> dict:
@@ -338,7 +362,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class Server(ThreadingHTTPServer):
-    allow_reuse_address = False
+    allow_reuse_address = (os.name != 'nt')
 
 
 def main():

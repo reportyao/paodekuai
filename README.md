@@ -39,6 +39,24 @@ python ai_bridge.py       # 默认 :8766；--bot-root 指定 pdk-ai 生产仓库
 - 桥接口（JSON，带 CORS）：`POST /init`（含 `mode: hybrid|dual`）、`POST /action`、`POST /act`、`POST /suggest`、`GET /legal`、`GET /health`（返回 `modes` 与 `botRoot`）。
 - 已验证：双模式自博弈完整局、hybrid vs dual 进程内对打（行为差异明显、胜负与净分曲线不同）、浏览器双模式端到端与提示来源压测。
 
+### 生产模型（pdk-ai README「当前生产模型与部署清单」）
+
+| 件 | 值 |
+|---|---|
+| 生产模型 | `ckpt/policy_a2c_final56.pt`（A2C + 56 维动作后特征）md5 `534dcca82ee60760a1a40c546a83e5f1` |
+| 推理配置 | `SolverAgent(hybrid, total_threshold=28)` + `_QFB`(final56) + 规则层 R0-R3 |
+| C 核心 | `c/pdk_core.so`（Linux，由 `pdk_core.c` 编译，源码 md5 `aefb96685e0dc8a164c60bc00388919a`） |
+| 可选回退 | `ckpt/qnet.pt`（旧 DMC）md5 `4be2824a0f47c98be6fa8c80276d0777` |
+
+桥的 `/health` 会回报实际加载的网络与四件套 md5 校验结果，可据此确认「接的是不是 final56」：
+
+```bash
+curl -s http://127.0.0.1:8766/health | python3 -m json.tool   # 看 productionModel / assets
+```
+
+已按 README 验证步骤复核：规则/C/引擎/求解器测试全绿（17468 对拍 0 不一致）、
+网络强度 random 84% / greedy 74% / l2 72%（150 局）、生产组合 vs greedy 胜率 84.5% 净分 +4.25（200 局）。
+
 ### 跨平台提示
 
 pdk-ai 的 `pdk/fast.py` 默认只找 `c/pdk_core.dll`（Windows）。Linux 部署需按 `os.name` 选择 `pdk_core.dll / pdk_core.so`（pdk-ai-prod 副本已含此补丁），并编译 C 核心：`gcc -O2 -shared -fPIC -o pdk_core.so pdk_core.c -lm`；未编译时自动回退纯 Python（慢但可用）。
