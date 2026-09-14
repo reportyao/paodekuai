@@ -426,7 +426,7 @@ function aiCandidates(seat) {
 const AI_BRIDGE = location.protocol.startsWith('http')
   ? location.origin + '/ai'
   : 'http://127.0.0.1:8766';
-const bridge = { sid: null, ready: false, mode: '', actions: [], actPending: false, initHands: null, initKitty: null, syncing: false, initing: false, waiters: [] };
+const bridge = { sid: null, ready: false, mode: '', actions: [], actPending: false, initHands: null, initKitty: null, syncing: false, initing: false, waiters: [], no: null, file: null };
 
 function toBotCard(c) {
   if (c.r === 14) return 44 + ([1, 2, 3].indexOf(c.s)); // pdk_ai的三张A槽位: 44,45,46
@@ -489,6 +489,8 @@ async function bridgeNewRound() {
     if (!r.sid) r = await doInit();                       // 失败自动重试一次
     if (r.sid) {
       bridge.sid = r.sid; bridge.mode = r.mode || prodMode(); bridge.ready = true;
+      bridge.no = r.no || null; bridge.file = r.file || null;   // 本局编号（复盘当局用）
+      S.currentNo = r.no || null;
       bridge.initHands = [hands0, hands1];
       bridge.initKitty = S.kitty.map(toBotCard);           // 重连重放用初始发牌+扣底
       setBridgeMode(true);
@@ -508,6 +510,7 @@ async function bridgeResync() {
       hands: bridge.initHands, kitty: bridge.initKitty || [],
       leader: S.roundLeader, opts: bridgeOpts(),
       mode: bridge.mode === 'dual' ? 'dual' : prodMode(),   // 重连保持本局模式
+      no: bridge.no, file: bridge.file,                     // 复用同编号/文件
       actions: bridge.actions,
     }, 12000);
     bridge.sid = r.sid || null; bridge.ready = !!r.sid;
@@ -1098,6 +1101,7 @@ async function openReview(no) {
   if (!data || !data.game) { toast((data && data.error) || '复盘加载失败'); return; }
   const g = data.game;
   RV.game = g; RV.no = g.no || no; RV.comments = data.comments || []; RV.step = 0;
+  RV.live = !!g.live;
 
   const isOnline = g.source === 'online_room';
   let names = g.names || (isOnline ? ['甲', '乙'] : ['你', 'AI']);
@@ -1147,7 +1151,8 @@ function renderReview() {
       + (ptype ? `（${ptype}）` : '')
       + (mv.handAfter !== undefined ? ` · 出后剩 ${mv.handAfter} 张` : '');
   }
-  $('rv-pos').textContent = RV.step + ' / ' + RV.total;
+  $('rv-pos').textContent = RV.step + ' / ' + RV.total + (RV.live ? '（进行中）' : '');
+  $('rv-refresh').classList.toggle('hidden', !RV.live);
   $('rv-h0').innerHTML = rvHandHTML(s.h0);
   $('rv-h1').innerHTML = rvHandHTML(s.h1);
   renderReviewComments();
@@ -1192,6 +1197,39 @@ async function saveReviewComment() {
   } catch { toast('保存失败'); }
 }
 
+/* ---- 对局页：复盘当局 / 复盘上一局 ---- */
+async function reviewCurrentGame() {
+  if (!bridge.no) {
+    toast('本局暂无编号（AI 服务未连接或这是第一手前）');
+    return;
+  }
+  RV.from = 'game';
+  await openReview(bridge.no);
+  // 默认定位到最新一手，方便就当前局面写点评
+  if (RV.total > 0) { RV.step = RV.total; renderReview(); }
+  const sel = $('rv-comment-ply');
+  if (sel && RV.total > 0) sel.value = String(RV.total);
+  $('rv-comment-ply').classList.toggle('hidden', false);
+}
+
+async function reviewPreviousGame() {
+  RV.from = 'game';
+  let no = S.prevRoundNo || null;
+  if (!no) {
+    // 没打过上一局 -> 取最近一局已结束的对局
+    try {
+      const r = await fetch('/replays/list').then(x => x.json());
+      const done = (r.games || []).filter(g => !g.live && g.no !== S.currentNo);
+      if (done.length) no = done[0].no;
+    } catch {}
+  }
+  if (!no) { toast('还没有可复盘的上一局'); return; }
+  await openReview(no);
+  if (RV.total > 0) { RV.step = RV.total; renderReview(); }
+  const sel = $('rv-comment-ply');
+  if (sel && RV.total > 0) sel.value = String(RV.total);
+}
+
 function reviewStep(d) {
   RV.step = Math.max(0, Math.min(RV.total, RV.step + d));
   renderReview();
@@ -1217,6 +1255,8 @@ function settle(winner) {
   return { winner, loser, rem, shut, base, bw, bl, dW, dL, redTxt };
 }
 function endRound(winner) {
+  S.prevRoundNo = S.currentNo || null;      // 本局结束 -> 成为“上一局”
+  S.currentNo = null;
   S.phase = 'roundEnd';
   clearTimeout(S.aiTimer);
   const r = settle(winner);
@@ -1334,7 +1374,14 @@ function render() {
   const opp = 1 - me;
   // 顶栏
   $('g-round').textContent = S.roundNo; $('g-rounds').textContent = S.rounds;
-  $('g-mode').textContent = S.mode === 'ai' ? '人机对战' : '双人热座';
+  $('g-mode').textContent = S.mode === 'ai' ? '人机对战' : (S.mode === 'online' ? '在线对战' : '双人热座');
+  const noEl = $('g-game-no');
+  noEl.textContent = S.currentNo ? ('本局 ' + S.currentNo) : (S.prevRoundNo ? ('上局 ' + S.prevRoundNo) : '');
+  noEl.classList.toggle('hidden', !S.currentNo && !S.prevRoundNo);
+  // 复盘按钮：仅人机对战模式（有桥、有编号体系）
+  const reviewable = S.mode === 'ai';
+  $('btn-review-cur').classList.toggle('hidden', !reviewable);
+  $('btn-review-prev').classList.toggle('hidden', !reviewable);
   $('g-score').innerHTML = `${S.names[0]} <b class="${S.total[0] >= S.total[1] ? 'pos' : 'neg'}">${S.total[0]}</b> : <b class="${S.total[1] >= S.total[0] ? 'pos' : 'neg'}">${S.total[1]}</b> ${S.names[1]}`;
   // 对手座位
   $('opp-avatar').textContent = S.avatars[opp];
@@ -1558,9 +1605,16 @@ function initLobby() {
   $('rv-next').addEventListener('click', () => reviewStep(1));
   $('rv-last').addEventListener('click', () => { RV.step = RV.total; renderReview(); });
   $('rv-comment-save').addEventListener('click', saveReviewComment);
+  $('rv-refresh').addEventListener('click', async () => {
+    await openReview(RV.no);
+    if (RV.total > 0) { RV.step = RV.total; renderReview(); }
+  });
+  $('btn-review-cur').addEventListener('click', () => reviewCurrentGame());
+  $('btn-review-prev').addEventListener('click', () => reviewPreviousGame());
   $('btn-review-close').addEventListener('click', () => {
     $('review-modal').classList.add('hidden');
-    showReplayHistory();
+    if (RV.from === 'game') { if (S.screen === 'game') render(); }   // 从对局页进入 -> 回到对局
+    else showReplayHistory();
   });
 }
 function humanPlay() {

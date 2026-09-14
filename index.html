@@ -102,6 +102,7 @@
       <div class="tb-left">
         <span class="chip gold">第 <b id="g-round">1</b>/<b id="g-rounds">10</b> 局</span>
         <span class="chip" id="g-mode"></span>
+        <span class="chip" id="g-game-no"></span>
       </div>
       <div class="tb-right">
         <span class="chip score" id="g-score"></span>
@@ -162,6 +163,8 @@
         </div>
         <div class="actions">
           <span id="turn-tip" class="turn-tip"></span>
+          <button id="btn-review-cur" class="btn rev-btn">📝 复盘当局</button>
+          <button id="btn-review-prev" class="btn rev-btn">📝 复盘上局</button>
           <button id="btn-hint" class="btn hint-btn2">💡 提示</button>
           <button id="btn-pass" class="btn warn">不出</button>
           <button id="btn-play" class="btn primary">出牌</button>
@@ -230,6 +233,7 @@
       <span id="rv-pos" class="rev-pos"></span>
       <button id="rv-next" class="btn ghost small">下一手 ▶</button>
       <button id="rv-last" class="btn ghost small">末手 ⏭</button>
+      <button id="rv-refresh" class="btn ghost small hidden">🔄 刷新</button>
     </div>
     <div class="rev-move" id="rv-move"></div>
 

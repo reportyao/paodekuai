@@ -99,6 +99,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "moves": len(d.get("moves", d.get("codes", []))),
                         "comments": cidx.get(no, 0),
                         "result": replay_report.result_of(d),
+                        "live": bool(d.get("live")),
                         "source": d.get("source", "ai_bridge"),
                     })
                 return {"games": games}

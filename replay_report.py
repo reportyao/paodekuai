@@ -251,6 +251,10 @@ def participants(d: dict) -> str:
 
 
 def result_of(d: dict) -> str:
+    if d.get("live"):
+        return "进行中"
+    if d.get("aborted"):
+        return "未完成（中断）"
     if d.get("source") == "online_room":
         r = d.get("result", {})
         names = d.get("names", ["甲", "乙"])

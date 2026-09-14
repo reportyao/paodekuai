@@ -181,24 +181,62 @@ def next_replay_no(dirpath: Path, prefix: str) -> str:
     return f"{prefix}{mx + 1:04d}"
 
 
-def save_replay(sid: str, s: Shadow):
-    if getattr(s, "saved", False) or not s.game.finished:
-        return
+_NO_LOCK = threading.Lock()
+
+
+def cleanup_stale_live(hours: float = 2.0):
+    """把超时未结束的 live 标记为已中断，避免“进行中”长期残留。"""
+    now = time.time()
+    for f in REPLAY_DIR.glob("*.json"):
+        try:
+            if now - f.stat().st_mtime < hours * 3600:
+                continue
+            d = json.loads(f.read_text(encoding="utf-8"))
+            if d.get("live"):
+                d["live"] = False
+                d["aborted"] = True
+                f.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            continue
+
+
+def allocate_no(prefix: str = "A") -> str:
+    """分配对局编号（进程内加锁，避免并发会话撞号）。"""
+    with _NO_LOCK:
+        return next_replay_no(REPLAY_DIR, prefix)
+
+
+def write_replay(s: Shadow, live: bool):
+    """写对局文件。开局即写（live=True，含编号），每手更新，终局改写 live=False。"""
     payload = {
-        "no": next_replay_no(REPLAY_DIR, "A"),        # 对局编号（A0001…），方便定位
-        "timeText": time.strftime("%Y-%m-%d %H:%M:%S"),  # 本地可读时间
-        "version": 2, "source": "ai_bridge", "sid": sid,
-        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "no": s.no,                                   # 对局编号（开局即定，方便“复盘当局”定位）
+        "timeText": s.time_text,
+        "live": bool(live),                           # True=进行中
+        "version": 2, "source": "ai_bridge", "sid": s.sid,
+        "ts": s.ts_iso,
         "names": ["human", "ai"], "mode": getattr(s, "prod_mode", "hybrid"),
         "net": getattr(s, "net", ""),
         "humanSeat": 0,                       # 座位0 = 真人，座位1 = AI
         "hands": s.init_payload["hands"], "kitty": s.init_payload.get("kitty", []),
         "leader": s.init_payload["leader"], "opts": s.init_payload["opts"],
         # moves: 每一手的完整明细（牌 id 可直接读；combo.ptype 0单1对2连对3三4三带二5三带一6飞机7顺子8炸弹9四带三）
-        "moves": getattr(s, "moves_detail", []),
-        "codes": s.codes, "winner": s.game.winner, "scores": list(s.game.scores or (0, 0)),
+        "moves": list(getattr(s, "moves_detail", [])),
+        "codes": list(s.codes),
+        "winner": (None if live else s.game.winner),
+        "scores": (None if live else list(s.game.scores or (0, 0))),
     }
-    (REPLAY_DIR / f"{sid}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        (REPLAY_DIR / s.file).write_text(json.dumps(payload, ensure_ascii=False, indent=2),
+                                         encoding="utf-8")
+    except OSError:
+        pass
+
+
+def save_replay(sid: str, s: Shadow):
+    """终局落盘（覆盖同编号文件，live 置 False）。"""
+    if getattr(s, "saved", False) or not s.game.finished:
+        return
+    write_replay(s, live=False)
     s.saved = True
 
 
@@ -214,8 +252,14 @@ def build_cfg(o: dict) -> Config:
 class Shadow:
     """一局的镜像状态 + AI 内核。"""
 
-    def __init__(self, hands, kitty, leader, opts, prod_mode="hybrid"):
+    def __init__(self, hands, kitty, leader, opts, prod_mode="hybrid",
+                 sid: str = "", reuse_no=None, reuse_file=None):
         self.created = time.time()
+        self.sid = sid or uuid.uuid4().hex[:12]
+        self.no = reuse_no or allocate_no("A")            # 开局即定编号（复盘当局用）
+        self.file = reuse_file or f"{self.sid}.json"      # 重同步复用同一文件，避免产生幽灵局
+        self.time_text = time.strftime("%Y-%m-%d %H:%M:%S")
+        self.ts_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         self.cfg = build_cfg(opts)
         engine = PROD_MODES.get(prod_mode, "c")
         self.prod_mode = "hybrid" if engine == "c" else prod_mode
@@ -269,6 +313,7 @@ class Shadow:
             self.game._play_unchecked(code)
         self.cg.step(code)
         self.codes.append(code)
+        write_replay(self, live=True)                     # 实时落盘（复盘当局/上一局都能看到最新进度）
 
     def legal_ids(self, seat: int):
         return [list(fast.code_to_cards(c, self.game.hand_ids(seat)))
@@ -295,11 +340,14 @@ def handle_init(p: dict):
     prod_mode = str(p.get("mode", "hybrid")).lower()
     if prod_mode not in PROD_MODES:
         return {"error": f"unknown mode '{prod_mode}' (choose hybrid|dual)"}, 400
-    s = Shadow(hands, kitty, leader, opts, prod_mode)
+    cleanup_stale_live()
     sid = uuid.uuid4().hex[:12]
+    s = Shadow(hands, kitty, leader, opts, prod_mode, sid=sid,
+               reuse_no=p.get("no"), reuse_file=p.get("file"))
     with LOCK:
         SESSIONS[sid] = s
     evict_old()
+    write_replay(s, live=True)                            # 开局即写（含编号 + 初始手牌）
     # 可选：创建后即重放一串动作（断线重同步用）
     for mv in p.get("actions", []):
         ok, err = do_action(sid, int(mv["seat"]), mv.get("cards", []))
@@ -307,7 +355,8 @@ def handle_init(p: dict):
             # 重放失败：不返回 sid，客户端会视为同步失败（避免拿到半重放会话）
             SESSIONS.pop(sid, None)
             return {"error": "replay failed: " + err}, 400
-    return {"sid": sid, "ai_seat": s.ai_seat, "mode": s.mode}, 200
+    return {"sid": sid, "ai_seat": s.ai_seat, "mode": s.mode,
+            "no": s.no, "file": s.file}, 200
 
 
 def do_action(sid: str, seat: int, cards):
