@@ -64,6 +64,33 @@ curl -s http://127.0.0.1:8766/health | python3 -m json.tool   # 看 productionMo
 已按 README 验证步骤复核：规则/C/引擎/求解器测试全绿（17468 对拍 0 不一致）、
 网络强度 random 84% / greedy 74% / l2 72%（150 局）、生产组合 vs greedy 胜率 84.5% 净分 +4.25（200 局）。
 
+### 与线上同步 AI 代码（一键）
+
+线上目录 `/home/ubuntu/pdk-ai-prod` 已是 **git 仓库**（origin=私有仓库，通过**只读部署密钥** `~/.ssh/pdk_ai_deploy` 拉取，服务器上不保存 token）。更新只需一条命令：
+
+```bash
+bash /home/ubuntu/paodekuai/update_ai.sh
+```
+
+它按顺序做（只动 `paodekuai-ai.service`，不触碰掼米/跑胡子/nginx 等其他服务）：
+
+1. `git pull --ff-only` 拉最新代码
+2. 校验**四件套 md5**（final56 / qnet / pdk_core.c）
+3. C 核心源码变新时自动 `gcc` 重建 `pdk_core.so`
+4. 跑冒烟测试（生成器对拍 / C 对拍 / R1+R3 / 残局顺序）
+5. 重启 AI 服务并打印 `/health`（含生产配置与资产校验）
+
+### 开局搜索（opening search）
+
+最新版 pdk-ai 已把 **开局搜索默认开启**（`SolverAgent(opening_search=True)`，首手且手牌 ≥12 张时触发，约 0.45~0.8s/局）：
+
+```
+/health  -> productionConfig.openingSearch = true     # 线上配置自述
+/stats   -> openingSearch: N, openingTime: T          # 实际触发次数与累计耗时
+```
+
+桥的 `/api/decide`（双真人提示）同样使用该配置，响应里也带 `openingSearch` 标记。
+
 ### 跨平台提示
 
 pdk-ai 的 `pdk/fast.py` 默认只找 `c/pdk_core.dll`（Windows）。Linux 部署需按 `os.name` 选择 `pdk_core.dll / pdk_core.so`（pdk-ai-prod 副本已含此补丁），并编译 C 核心：`gcc -O2 -shared -fPIC -o pdk_core.so pdk_core.c -lm`；未编译时自动回退纯 Python（慢但可用）。

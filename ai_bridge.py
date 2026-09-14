@@ -87,6 +87,22 @@ if os.name == "nt":
     ASSET_MD5["c/pdk_core.dll"] = "f49c46e86313075df918caad4fa2f085"
 
 
+def prod_config_info() -> dict:
+    """生产推理配置自述：开局搜索是否开启（线上确认用）。"""
+    try:
+        import inspect
+        from pdk.agents import SolverAgent
+        pr = inspect.signature(SolverAgent.__init__).parameters
+        return {
+            "openingSearch": bool(pr["opening_search"].default),   # 桥未覆盖 → 生效=类默认
+            "openingWorlds": int(pr["opening_worlds"].default),
+            "totalThreshold": 28,        # 桥显式传入（与生产 build_ai 同值）
+            "overrides": "total_threshold=28, max_rows=400000",
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def verify_assets() -> dict:
     """启动/健康检查时校验生产模型与 C 核心是否与 README 清单一致。"""
     import hashlib
@@ -198,6 +214,12 @@ class Shadow:
         self.lock = threading.Lock()
 
     # 与 pdk_ai server._apply 相同的镜像顺序：先 observe 后落子
+    def snapshot_stats(self):
+        try:
+            self.last_stats = dict(getattr(self.agent, "stats", {}) or {})
+        except Exception:
+            pass
+
     def _apply(self, code: int):
         trick_before = (None if self.cg.g.trick[0] == 255
                         else tuple(self.cg.g.trick))
@@ -306,6 +328,7 @@ def do_act(sid: str):
             return {"error": f"not ai turn (turn={s.game.turn})"}, 400
         try:
             code = s.agent.act(s.cg)
+            s.snapshot_stats()
             # 注意顺序：先由当前手牌把 code 映射成具体牌 id，再落子镜像
             # （落子后手牌已移除，code_to_cards 会取不到牌）
             cards = list(fast.code_to_cards(code, s.game.hand_ids(s.ai_seat)))
@@ -335,6 +358,7 @@ def do_suggest(sid: str):
         if rep.game.finished or int(rep.game.turn) != 0:
             return {"fallback": True}, 200
         code = rep.agent.act(rep.cg)
+        rep.snapshot_stats()
         cards = list(fast.code_to_cards(code, rep.game.hand_ids(0)))
     return {"cards": cards}, 200
 
@@ -354,6 +378,10 @@ def do_decide(p: dict):
             out = _decide_with_engine(p, engine=engine)  # dual: 残局数值计分接力
         out["mode"] = "hybrid" if engine == "c" else mode
         out["engine"] = engine
+        try:
+            out["openingSearch"] = prod_config_info().get("openingSearch", None)
+        except Exception:
+            pass
         return out, 200
     except Exception as e:
         return {"error": str(e), "fallback": True}, 200
@@ -445,8 +473,23 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "agent": "prod",
                             "productionModel": "ckpt/policy_a2c_final56.pt",
                             "modes": sorted(PROD_MODES),
-                            "botRoot": str(BOT_ROOT), "sessions": n, "v": 5,
+                            "botRoot": str(BOT_ROOT), "sessions": n, "v": 6,
+                            "productionConfig": prod_config_info(),
                             "assets": verify_assets()})
+            elif u.path == "/stats":
+                with LOCK:
+                    sess = list(SESSIONS.values())
+                agg = {"sessions": len(sess), "openingSearch": 0, "openingTime": 0.0,
+                       "oneShot": 0, "endgameOrder": 0, "reportDump": 0}
+                for s in sess:
+                    st = getattr(s, "last_stats", {}) or {}
+                    agg["openingSearch"] += int(st.get("opening_search", 0))
+                    agg["openingTime"] += float(st.get("opening_time", 0.0))
+                    agg["oneShot"] += int(st.get("one_shot", 0))
+                    agg["endgameOrder"] += int(st.get("endgame_order", 0))
+                    agg["reportDump"] += int(st.get("report_dump", 0))
+                agg["openingTime"] = round(agg["openingTime"], 2)
+                self._json(agg)
             elif u.path == "/legal":
                 from urllib.parse import parse_qs
                 q = parse_qs(u.query)
