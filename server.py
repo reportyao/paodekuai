@@ -13,6 +13,9 @@ import socketserver
 import sys
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import replay_report  # noqa: E402  对局编号/读取/人工点评（与 CLI 同一实现）
+
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8310
 AI_UPSTREAM = os.environ.get('PDK_AI_BRIDGE', 'http://127.0.0.1:8766').rstrip('/')
 ONLINE_UPSTREAM = os.environ.get('PDK_ONLINE', 'http://127.0.0.1:8311').rstrip('/')
@@ -26,6 +29,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         '.css': 'text/css; charset=utf-8',
         '.html': 'text/html; charset=utf-8',
     }
+
+    def _json(self, obj, code=200):
+        data = json.dumps(obj, ensure_ascii=False).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def end_headers(self):
         self.send_header('Cache-Control', 'no-store')
@@ -68,7 +79,68 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
 
+    # ---- /replays/* 对局记录（编号定位 + 逐手详情 + 人工点评）----
+    def _replays(self, method):
+        import urllib.parse
+        u = urllib.parse.urlparse(self.path)
+        q = urllib.parse.parse_qs(u.query)
+        try:
+            if u.path == "/replays/list":
+                cidx = replay_report.comments_index()
+                games = []
+                for d in replay_report.load_games():
+                    no = str(d.get("no", ""))
+                    tag = (f"{d['code']}-r{d['round']}" if d.get("source") == "online_room"
+                           else str(d.get("sid", d.get("_file", "")))[:10])
+                    games.append({
+                        "no": no, "time": replay_report.time_of(d),
+                        "kind": replay_report.kind_of(d), "tag": tag,
+                        "participants": replay_report.participants(d),
+                        "moves": len(d.get("moves", d.get("codes", []))),
+                        "comments": cidx.get(no, 0),
+                        "result": replay_report.result_of(d),
+                        "source": d.get("source", "ai_bridge"),
+                    })
+                return {"games": games}
+            if u.path == "/replays/get":
+                no = (q.get("no") or [""])[0]
+                d = replay_report.find_by_id(no)
+                if not d:
+                    return {"error": f"找不到对局 {no}"}
+                game = {k: v for k, v in d.items() if not k.startswith("_")}
+                game["_file"] = d.get("_file", "")
+                if not game.get("moves") and game.get("codes"):
+                    # 旧格式：只有动作码 -> 生成“点数文本”逐手（无花色），前端照常显示
+                    game["legacyMoves"] = [
+                        {"ply": i + 1, "seat": i % 2,
+                         "text": replay_report.code_str(cd), "pass": cd == 0}
+                        for i, cd in enumerate(game["codes"])
+                    ]
+                return {"game": game, "comments": replay_report.load_comments(str(d.get("no", "")))}
+            if u.path == "/replays/comment" and method == "POST":
+                n = int(self.headers.get("Content-Length", 0) or 0)
+                raw = self.rfile.read(n) or b"{}"
+                try:
+                    payload = json.loads(raw.decode("utf-8"))
+                except UnicodeDecodeError:                 # 少数客户端按 GBK 发中文
+                    payload = json.loads(raw.decode("gbk", "replace"))
+                no = str(payload.get("no", "")).upper()
+                text = str(payload.get("text", "")).strip()
+                if not no or not text:
+                    return {"error": "no 与 text 必填"}
+                ply = payload.get("ply")
+                ply = int(ply) if ply not in (None, "", "null") else None
+                author = str(payload.get("author", "") or "人工")[:12]
+                rec = replay_report.save_comment(no, text, ply, author)
+                return {"ok": True, "saved": rec,
+                        "comments": replay_report.load_comments(no)}
+            return {"error": "unknown replays endpoint"}
+        except Exception as e:
+            return {"error": str(e)}
+
     def do_GET(self):
+        if self.path.startswith("/replays/"):
+            return self._json(self._replays("GET"))
         if self._is_ai():
             return self._proxy(AI_UPSTREAM, '/ai')
         if self._is_online():
@@ -76,6 +148,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self):
+        if self.path.startswith("/replays/"):
+            return self._json(self._replays("POST"))
         if self._is_ai():
             return self._proxy(AI_UPSTREAM, '/ai')
         if self._is_online():

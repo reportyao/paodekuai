@@ -119,6 +119,24 @@ ls -t /home/ubuntu/paodekuai/data/replays/*.json | head   # 最新对局
 python3 -m json.tool "$(ls -t /home/ubuntu/paodekuai/data/replays/*.json | head -1)"
 ```
 
+## 对局记录 / 复盘（网页内查看 + 人工点评）
+
+**网页里**：大厅点「📚 对局记录」→ 服务器对局列表（每局**唯一编号** A=人机 / H=真人 + 时间 + 参与 + 手数 + 结果）；
+点任意一局进入**逐手复盘**：⏮开局 / ◀上一手 / 下一手▶ / 末手⏭ 逐步查看**双方手牌**与**每一手出牌详情**（牌面、牌型、剩余张数）。
+
+**人工点评**（人来复盘、帮 AI 快速学习）：
+
+- 复盘页底部输入点评，可选「整局」或「针对第 N 手」；
+- 落盘为 `data/comments/<编号>.json`（按局）与 `data/human_reviews.jsonl`（全量一行一条）；
+- 每条都带标记，AI 可直奔定位：
+
+```json
+{"source": "human_review", "kind": "human_comment",
+ "no": "H0002", "ply": 3, "text": "第3手应保留顺子结构", "author": "人工", "ts": "…"}
+```
+
+- 网页 API：`GET /replays/list`、`GET /replays/get?no=H0002`、`POST /replays/comment {no,text,ply}`。
+
 ## 对局记录 / 复盘（供 AI 读取）
 
 所有对局以**完整、自包含**的 JSON 落盘（无需解码即可读牌面），并附复盘工具 `replay_report.py`：

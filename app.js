@@ -1045,15 +1045,157 @@ function downloadJSON(filename, value) {
   const url = URL.createObjectURL(blob), a = document.createElement('a');
   a.href = url; a.download = filename; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
-function showReplayHistory() {
-  loadReplayArchive();
+/* ---- 对局记录：服务器列表（唯一编号 + 时间 + 点评数），点击进入复盘 ---- */
+const RV = { game: null, step: 0, total: 0, comments: [], snapshots: [], no: '', names: [] };
+const PTT = { 0: '单张', 1: '对子', 2: '连对', 3: '三张', 4: '三带二', 5: '三带一', 6: '飞机', 7: '顺子', 8: '炸弹', 9: '四带三' };
+const RV_RANK = '3456789XJQKA2';
+const RV_SUIT = '♠♥♣♦';
+
+function rvCardText(ids) { return (ids || []).map(c => RV_SUIT[c & 3] + RV_RANK[c >> 2]).join(' '); }
+
+async function showReplayHistory() {
   const box = $('history-list');
-  if (!S.replayArchive.length) box.innerHTML = '<div class="hint-modal-desc">暂无已保存的对局记录。</div>';
-  else box.innerHTML = S.replayArchive.map((r, i) => `<div class="res-line"><span class="k">${new Date(r.ts).toLocaleString()}</span><span class="v">第${r.round}局 · ${r.game} · ${r.moves.length}手 · ${r.result.winner === 0 ? '玩家胜' : 'AI胜'} · ${r.result.delta.join(':')}</span><button class="btn ghost small" data-replay="${i}">下载</button></div>`).join('');
-  box.querySelectorAll('[data-replay]').forEach(b => b.addEventListener('click', () => downloadJSON('paodekuai-replay-' + (b.dataset.replay) + '.json', S.replayArchive[+b.dataset.replay])));
+  box.innerHTML = '<div class="hint-modal-desc">加载中…</div>';
   $('history-modal').classList.remove('hidden');
+  try {
+    const r = await fetch('/replays/list').then(x => x.json());
+    const games = (r && r.games) || [];
+    if (!games.length) { box.innerHTML = '<div class="hint-modal-desc">暂无对局记录。</div>'; return; }
+    box.innerHTML = games.map(g => `<div class="res-line rv-row" data-no="${g.no}">
+        <span class="rv-no">${g.no}</span>
+        <span class="v">${g.time} ｜ ${g.kind} ｜ ${g.participants} ｜ ${g.moves}手 ｜ ${g.result}</span>
+        <span class="rv-badge${g.comments ? '' : ' hidden'}">✍️${g.comments}</span>
+        <button class="btn ghost small">复盘</button>
+      </div>`).join('');
+    box.querySelectorAll('.rv-row').forEach(el => el.addEventListener('click', () => openReview(el.dataset.no)));
+  } catch (e) {
+    loadReplayArchive();
+    box.innerHTML = S.replayArchive.length
+      ? S.replayArchive.map((x, i) => `<div class="res-line"><span class="k">${new Date(x.ts).toLocaleString()}</span><span class="v">第${x.round}局 · ${x.moves.length}手</span><button class="btn ghost small" data-replay="${i}">下载</button></div>`).join('')
+      : '<div class="hint-modal-desc">服务器不可用，且本地无记录。</div>';
+    box.querySelectorAll('[data-replay]').forEach(b => b.addEventListener('click', () => downloadJSON('replay-' + b.dataset.replay + '.json', S.replayArchive[+b.dataset.replay])));
+  }
 }
-function exportAllReplays() { loadReplayArchive(); downloadJSON('paodekuai-replays.json', S.replayArchive); }
+async function exportAllReplays() {
+  try {
+    const r = await fetch('/replays/list').then(x => x.json());
+    const all = [];
+    for (const g of (r.games || [])) {
+      const d = await fetch('/replays/get?no=' + encodeURIComponent(g.no)).then(x => x.json());
+      if (d && d.game) all.push(Object.assign({}, d.game, { humanComments: d.comments || [] }));
+    }
+    downloadJSON('paodekuai-all-games.json', all);
+  } catch { loadReplayArchive(); downloadJSON('paodekuai-local-replays.json', S.replayArchive); }
+}
+
+/* ---- 逐手复盘查看器 ---- */
+async function openReview(no) {
+  $('rv-move').textContent = '加载中…';
+  $('review-modal').classList.remove('hidden');
+  let data;
+  try { data = await fetch('/replays/get?no=' + encodeURIComponent(no)).then(x => x.json()); }
+  catch { toast('复盘加载失败'); return; }
+  if (!data || !data.game) { toast((data && data.error) || '复盘加载失败'); return; }
+  const g = data.game;
+  RV.game = g; RV.no = g.no || no; RV.comments = data.comments || []; RV.step = 0;
+
+  const isOnline = g.source === 'online_room';
+  let names = g.names || (isOnline ? ['甲', '乙'] : ['你', 'AI']);
+  if (!isOnline && names[0] === 'human' && names[1] === 'ai') names = ['你', '电脑'];   // 人机局显示名
+  RV.names = names;
+  const init0 = ((isOnline ? g.initialHands : g.hands) || [])[0] || [];
+  const init1 = ((isOnline ? g.initialHands : g.hands) || [])[1] || [];
+  const seq = (g.moves && g.moves.length) ? g.moves : (g.legacyMoves || []);
+  RV.total = seq.length;
+
+  // 逐步手牌快照（初始 + 每手之后）
+  RV.snapshots = [];
+  let h0 = init0.slice(), h1 = init1.slice();
+  RV.snapshots.push({ h0: h0.slice(), h1: h1.slice(), move: null });
+  for (const m of seq) {
+    const cards = m.cards || [];
+    if (m.seat === 0) h0 = h0.filter(c => cards.indexOf(c) < 0);
+    else h1 = h1.filter(c => cards.indexOf(c) < 0);
+    RV.snapshots.push({ h0: h0.slice(), h1: h1.slice(), move: m });
+  }
+
+  $('rv-title').textContent = '复盘 ' + RV.no;
+  $('rv-meta').innerHTML = isOnline
+    ? `${g.timeText || ''} ｜ 真人局 房号${g.code} 第${g.round}/${g.rounds}局 ｜ ${names[0]} vs ${names[1]} ｜ 先手 座位${g.firstPlayer}`
+    : `${g.timeText || ''} ｜ 人机局 ｜ ${names[0]}(座位0) vs ${names[1]}(座位1) ｜ 模式 ${g.mode || ''} ｜ ${g.net || ''}`;
+  $('rv-h0-title').textContent = names[0] + '（座位0）';
+  $('rv-h1-title').textContent = names[1] + '（座位1）';
+
+  const sel = $('rv-comment-ply');
+  sel.innerHTML = '<option value="">整局点评</option>' + seq.map((m, i) =>
+    `<option value="${i + 1}">第${i + 1}手（${names[m.seat] || '座位' + m.seat}）</option>`).join('');
+  renderReview();
+}
+
+function renderReview() {
+  const s = RV.snapshots[RV.step];
+  if (!s) return;
+  const mv = s.move;
+  const ptype = (mv && mv.combo) ? (PTT[mv.combo.ptype] || '牌型') : '';
+  if (!mv) {
+    $('rv-move').innerHTML = '<b>开局</b>：双方各 16 张（下方为初始手牌）';
+  } else if (mv.pass) {
+    $('rv-move').innerHTML = `<b>第${mv.ply}手</b>：${RV.names[mv.seat]} <span class="rv-pass">不出</span>${mv.pass_on ? '（被过牌型 ' + JSON.stringify(mv.pass_on) + '）' : ''}`;
+  } else {
+    const shown = mv.text ? mv.text : rvCardText(mv.cards);
+    $('rv-move').innerHTML = `<b>第${mv.ply}手</b>：${RV.names[mv.seat]} 出 <span class="rv-cards">${shown}</span>`
+      + (ptype ? `（${ptype}）` : '')
+      + (mv.handAfter !== undefined ? ` · 出后剩 ${mv.handAfter} 张` : '');
+  }
+  $('rv-pos').textContent = RV.step + ' / ' + RV.total;
+  $('rv-h0').innerHTML = rvHandHTML(s.h0);
+  $('rv-h1').innerHTML = rvHandHTML(s.h1);
+  renderReviewComments();
+}
+
+function rvHandHTML(cards) {
+  if (!cards.length) return '<span class="rv-empty">（已出完）</span>';
+  return cards.map(c => {
+    const red = (c & 3) === 1 || (c & 3) === 3;
+    return `<span class="rv-card${red ? ' red' : ''}">${RV_RANK[c >> 2]}<i>${RV_SUIT[c & 3]}</i></span>`;
+  }).join('');
+}
+
+function renderReviewComments() {
+  const box = $('rv-comment-list');
+  if (!RV.comments.length) {
+    box.innerHTML = '<div class="rv-empty">还没有点评。写下第一条，帮 AI 快速定位学习。</div>';
+    return;
+  }
+  box.innerHTML = RV.comments.map(c => `<div class="rv-comment">
+      <span class="rv-tag">${c.ply ? '第' + c.ply + '手' : '整局'}</span>
+      <span class="rv-tag2">${c.kind || 'human_comment'}</span>
+      <span class="rv-ctext">${String(c.text || '').replace(/[<>]/g, '')}</span>
+      <span class="rv-cts">${c.ts || ''} ${c.author || ''}</span>
+    </div>`).join('');
+}
+
+async function saveReviewComment() {
+  const text = $('rv-comment-text').value.trim();
+  if (!text) { toast('请先写点评内容'); return; }
+  const plyRaw = $('rv-comment-ply').value;
+  const body = { no: RV.no, text: text, ply: plyRaw ? +plyRaw : null };
+  try {
+    const r = await fetch('/replays/comment', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    }).then(x => x.json());
+    if (!r.ok) { toast(r.error || '保存失败'); return; }
+    RV.comments = r.comments || [];
+    $('rv-comment-text').value = '';
+    renderReviewComments();
+    toast('点评已保存（标记 human_review）');
+  } catch { toast('保存失败'); }
+}
+
+function reviewStep(d) {
+  RV.step = Math.max(0, Math.min(RV.total, RV.step + d));
+  renderReview();
+}
 
 /* ================= 结算 ================= */
 function settle(winner) {
@@ -1386,6 +1528,16 @@ function initLobby() {
   $('btn-history-lobby').addEventListener('click', showReplayHistory);
   $('btn-history-close').addEventListener('click', () => $('history-modal').classList.add('hidden'));
   $('btn-export-all').addEventListener('click', exportAllReplays);
+  // 复盘查看器
+  $('rv-first').addEventListener('click', () => { RV.step = 0; renderReview(); });
+  $('rv-prev').addEventListener('click', () => reviewStep(-1));
+  $('rv-next').addEventListener('click', () => reviewStep(1));
+  $('rv-last').addEventListener('click', () => { RV.step = RV.total; renderReview(); });
+  $('rv-comment-save').addEventListener('click', saveReviewComment);
+  $('btn-review-close').addEventListener('click', () => {
+    $('review-modal').classList.add('hidden');
+    showReplayHistory();
+  });
 }
 function humanPlay() {
   const me = myTurnHuman();

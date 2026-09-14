@@ -204,14 +204,57 @@
   </div>
 </div>
 
-<!-- ======== 对局记录 ======== -->
+<!-- ======== 对局记录（服务器：编号定位 + 逐手复盘 + 人工点评） ======== -->
 <div id="history-modal" class="modal hidden">
-  <div class="modal-card">
+  <div class="modal-card wide">
     <div class="modal-title">📚 对局记录</div>
+    <div class="rev-hint">每局有唯一编号（A=人机 / H=真人），点任意一局进入逐手复盘；可在复盘里写人工点评（AI 学习信号）。</div>
     <div id="history-list" class="modal-list"></div>
     <div class="modal-btns">
-      <button id="btn-export-all" class="btn primary big">导出全部 JSON</button>
-      <button id="btn-history-close" class="btn ghost">关闭</button>
+      <button id="btn-export-all" class="btn ghost big">导出全部 JSON（含点评）</button>
+      <button id="btn-history-close" class="btn primary">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- ======== 复盘查看器 ======== -->
+<div id="review-modal" class="modal hidden">
+  <div class="modal-card wide">
+    <div class="modal-title" id="rv-title">复盘</div>
+    <div class="rev-meta" id="rv-meta"></div>
+
+    <div class="rev-step">
+      <button id="rv-first" class="btn ghost small">⏮ 开局</button>
+      <button id="rv-prev" class="btn ghost small">◀ 上一手</button>
+      <span id="rv-pos" class="rev-pos"></span>
+      <button id="rv-next" class="btn ghost small">下一手 ▶</button>
+      <button id="rv-last" class="btn ghost small">末手 ⏭</button>
+    </div>
+    <div class="rev-move" id="rv-move"></div>
+
+    <div class="rev-hands">
+      <div class="rev-hand-block">
+        <div class="rev-hand-title" id="rv-h0-title">座位0</div>
+        <div class="rev-hand" id="rv-h0"></div>
+      </div>
+      <div class="rev-hand-block">
+        <div class="rev-hand-title" id="rv-h1-title">座位1</div>
+        <div class="rev-hand" id="rv-h1"></div>
+      </div>
+    </div>
+
+    <div class="rev-comments">
+      <div class="rev-hand-title">✍️ 人工点评（标记 source=human_review，便于 AI 定位学习）</div>
+      <div id="rv-comment-list" class="rev-comment-list"></div>
+      <div class="rev-comment-input">
+        <select id="rv-comment-ply" class="rev-select"></select>
+        <textarea id="rv-comment-text" rows="2" placeholder="写下你的复盘点评：哪里好、哪里失误、应该怎么打…"></textarea>
+        <button id="rv-comment-save" class="btn primary">保存点评</button>
+      </div>
+    </div>
+
+    <div class="modal-btns">
+      <button id="btn-review-close" class="btn ghost big">返回记录列表</button>
     </div>
   </div>
 </div>
