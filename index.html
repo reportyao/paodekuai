@@ -214,7 +214,12 @@
 <div id="history-modal" class="modal hidden">
   <div class="modal-card wide">
     <div class="modal-title">📚 对局记录</div>
-    <div class="rev-hint">每局有唯一编号（A=人机 / H=真人），点任意一局进入逐手复盘；可在复盘里写人工点评（AI 学习信号）。</div>
+    <div class="rev-hint">每局有唯一编号（A=人机 / H=真人 / E=外部 API 调用），点任意一局进入逐手复盘；可在复盘里写人工点评（AI 学习信号）。</div>
+    <div class="rv-scope">
+      <button id="hs-mine" class="btn ghost small active">我的对局（A/H）</button>
+      <button id="hs-api" class="btn ghost small">对外调用（E）</button>
+    </div>
+    <div id="history-stats" class="hs-stats"></div>
     <div id="history-list" class="modal-list"></div>
     <div class="modal-btns">
       <button id="btn-export-all" class="btn ghost big">导出全部 JSON（含点评）</button>

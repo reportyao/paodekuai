@@ -1288,14 +1288,48 @@ const RV_SUIT = '♠♥♣♦';
 
 function rvCardText(ids) { return (ids || []).map(c => RV_SUIT[c & 3] + RV_RANK[c >> 2]).join(' '); }
 
-async function showReplayHistory() {
+let HS_SCOPE = 'mine';                                  // mine=我的对局(A/H)  api=对外调用(E)
+
+async function showReplayHistory(scope) {
+  if (scope) HS_SCOPE = scope;
   const box = $('history-list');
+  const sbox = $('history-stats');
   box.innerHTML = '<div class="hint-modal-desc">加载中…</div>';
+  if (sbox) sbox.innerHTML = '';
   $('history-modal').classList.remove('hidden');
+  $('hs-mine').classList.toggle('active', HS_SCOPE === 'mine');
+  $('hs-api').classList.toggle('active', HS_SCOPE === 'api');
   try {
-    const r = await fetch('/replays/list').then(x => x.json());
+    const r = await fetch('/replays/list?scope=' + HS_SCOPE).then(x => x.json());
     const games = (r && r.games) || [];
-    if (!games.length) { box.innerHTML = '<div class="hint-modal-desc">暂无对局记录。</div>'; return; }
+    // 统计条：对外场次看调用方胜负，我的场次看我的胜负与点评数
+    try {
+      const st = await fetch('/replays/stats?scope=' + HS_SCOPE).then(x => x.json());
+      if (sbox && st && st.summary) {
+        const a = st.summary;
+        const parts = [`共 <b>${a.games}</b> 局`];
+        if (a.finished) parts.push(`已完成 <b>${a.finished}</b>`);
+        if (a.live) parts.push(`进行中 <b>${a.live}</b>`);
+        if (a.finished) {
+          parts.push(HS_SCOPE === 'api'
+            ? `调用方胜 <b>${a.seat0_wins}</b> ｜ AI 胜 <b>${a.seat1_wins}</b>`
+            : `我胜 <b>${a.seat0_wins}</b> ｜ AI 胜 <b>${a.seat1_wins}</b>`);
+          if (a.avg_moves) parts.push(`平均 <b>${a.avg_moves}</b> 手`);
+          if (a.avg_duration) parts.push(`平均用时 <b>${a.avg_duration}s</b>`);
+        }
+        if (st.by_caller && Object.keys(st.by_caller).length) {
+          const cs = Object.entries(st.by_caller).slice(0, 4)
+            .map(([k, v]) => `${esc(k)} ${v.finished ? v.seat0_wins + ':' + v.seat1_wins : '—'}`).join('　');
+          parts.push(`按调用方：${cs}`);
+        }
+        sbox.innerHTML = parts.join(' ｜ ');
+      }
+    } catch (e) { /* 统计失败不影响列表 */ }
+    if (!games.length) {
+      box.innerHTML = '<div class="hint-modal-desc">' +
+        (HS_SCOPE === 'api' ? '还没有外部调用方的对局（对方通过 API 打完一局后会出现在这里）。' : '暂无对局记录。') + '</div>';
+      return;
+    }
     box.innerHTML = games.map(g => `<div class="res-line rv-row" data-no="${g.no}">
         <span class="rv-no">${g.no}</span>
         <span class="v">${g.time} ｜ ${g.kind} ｜ ${g.participants} ｜ ${g.moves}手 ｜ ${g.result}</span>
@@ -1895,6 +1929,8 @@ function initLobby() {
   $('on-code').addEventListener('keydown', e => { if (e.key === 'Enter') onlineJoin(); });
   $('btn-history-lobby').addEventListener('click', showReplayHistory);
   $('btn-history-close').addEventListener('click', () => $('history-modal').classList.add('hidden'));
+  $('hs-mine').addEventListener('click', () => showReplayHistory('mine'));
+  $('hs-api').addEventListener('click', () => showReplayHistory('api'));
   $('btn-export-all').addEventListener('click', exportAllReplays);
   // 复盘查看器
   $('rv-first').addEventListener('click', () => { RV.step = 0; renderReview(); });

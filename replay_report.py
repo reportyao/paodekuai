@@ -32,7 +32,9 @@ import sys
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
-DIRS = [(BASE / "data" / "replays", "A"), (BASE / "data" / "online", "H")]
+# 目录 -> 编号前缀：A=人机局（主站） H=真人局（在线房） E=外部 API 调用方
+DIRS = [(BASE / "data" / "replays", "A"), (BASE / "data" / "online", "H"),
+        (BASE / "data" / "external", "E")]
 COMMENT_DIR = BASE / "data" / "comments"
 COMMENT_JSONL = BASE / "data" / "human_reviews.jsonl"
 RANK = "3456789XJQKA2"
@@ -146,6 +148,9 @@ def load_games(prefix_filter: str | None = None) -> list[dict]:
         d["_mtime"] = p.stat().st_mtime
         d["_epoch"] = _epoch(d, d["_mtime"])
         d["_prefix"] = prefix
+        if prefix == "E":                     # data/external 目录里的都是外部调用方的对局
+            d["api"] = True
+            d.setdefault("caller", "API 调用方(未标注)")
         out.append(d)
     return sorted(out, key=lambda d: d["_epoch"], reverse=True)
 
@@ -243,10 +248,14 @@ def code_str(code: int) -> str:
 
 
 def kind_of(d: dict) -> str:
+    if d.get("_prefix") == "E" or d.get("api") or d.get("caller"):
+        return "对外"
     return "真人" if d.get("source") == "online_room" else "人机"
 
 
 def participants(d: dict) -> str:
+    if d.get("api") or d.get("caller"):
+        return f"{d.get('caller') or 'API 调用方'} vs AI"
     return "/".join(d.get("names", [])) if d.get("source") == "online_room" else "你 vs AI"
 
 
@@ -260,10 +269,78 @@ def result_of(d: dict) -> str:
         names = d.get("names", ["甲", "乙"])
         w = names[r.get("winner", 0)] if r.get("winner", 0) < len(names) else "?"
         return f"{w} 胜 剩{r.get('rem')}张 分{r.get('delta')}"
+    if d.get("api") or d.get("caller"):
+        who = "调用方" if d.get("winner") == 0 else "AI"
+        dur = d.get("durationSec")
+        return f"{who} 胜 分{d.get('scores')}" + (f" 用时{dur}s" if dur else "")
     return f"{'你' if d.get('winner') == 0 else 'AI'} 胜 分{d.get('scores')}"
 
 
 # ---------------- 命令 ----------------
+
+def stats_of(games: list) -> dict:
+    """对局胜负统计（按传入的对局集合）。对外调用方按 caller 分组。"""
+    def blank():
+        return {"games": 0, "finished": 0, "live": 0, "aborted": 0,
+                "seat0_wins": 0, "seat1_wins": 0, "scores": {},
+                "moves": 0, "dur_sum": 0.0, "dur_n": 0}
+    out = {"all": blank(), "by_caller": {}, "by_day": {}}
+    for g in games:
+        kind = "api" if (g.get("api") or g.get("caller")) else (
+            "online" if g.get("source") == "online_room" else "human_vs_ai")
+        for key in ("all", kind):
+            b = out.setdefault(key, blank()) if key != "all" else out["all"]
+            b["games"] += 1
+            if g.get("live"):
+                b["live"] += 1
+                continue
+            if g.get("aborted") or g.get("winner") is None:
+                b["aborted"] += 1
+                continue
+            b["finished"] += 1
+            b["seat0_wins" if g.get("winner") == 0 else "seat1_wins"] += 1
+            mv = len(g.get("moves") or g.get("codes") or [])
+            b["moves"] += mv
+            if g.get("durationSec"):
+                b["dur_sum"] += float(g["durationSec"])
+                b["dur_n"] += 1
+            sc = g.get("scores")
+            if isinstance(sc, (list, tuple)) and len(sc) == 2:
+                k = f"{sc[0]},{sc[1]}"
+                b["scores"][k] = b["scores"].get(k, 0) + 1
+        mv_n = len(g.get("moves") or g.get("codes") or [])
+        if kind == "api":
+            c = out["by_caller"].setdefault(g.get("caller") or "API 调用方", blank())
+            c["games"] += 1
+            if g.get("winner") is not None and not g.get("live"):
+                c["finished"] += 1
+                c["moves"] += mv_n
+                c["seat0_wins" if g.get("winner") == 0 else "seat1_wins"] += 1
+            if g.get("durationSec"):
+                c["dur_sum"] += float(g["durationSec"])
+                c["dur_n"] += 1
+        day = str(g.get("timeText") or "")[:10]
+        if day:
+            d = out["by_day"].setdefault(day, blank())
+            d["games"] += 1
+            if g.get("winner") is not None and not g.get("live"):
+                d["finished"] += 1
+                d["moves"] += mv_n
+                d["seat0_wins" if g.get("winner") == 0 else "seat1_wins"] += 1
+    for b in [out["all"]] + list(out["by_caller"].values()) + list(out["by_day"].values())             + [v for k, v in out.items() if k not in ("all", "by_caller", "by_day")]:
+        if not isinstance(b, dict):
+            continue
+        if b["finished"]:
+            b["avg_moves"] = round(b["moves"] / b["finished"], 1)
+            b["seat0_win_rate"] = round(b["seat0_wins"] / b["finished"], 3)
+            b["avg_duration"] = round(b["dur_sum"] / b["dur_n"], 1) if b["dur_n"] else None
+    return out
+
+
+def external_games() -> list:
+    """仅外部 API 调用方的对局（E 段）。"""
+    return [g for g in load_games() if g.get("api") or g.get("caller")]
+
 
 def cmd_list(prefix_filter=None):
     games = load_games(prefix_filter)
@@ -344,10 +421,39 @@ def cmd_comments(no=None):
         print(f"{c.get('no', '?'):<7} {ply:<6} {c.get('ts', ''):<20} {c.get('kind', ''):<14} {c.get('text', '')}")
 
 
-def cmd_stats():
+def _fmt_block(b: dict) -> str:
+    if not b["games"]:
+        return "无"
+    s = f"{b['games']} 局（完成 {b['finished']} / 进行中 {b['live']}）"
+    if b["finished"]:
+        s += (f"，座位0胜 {b['seat0_wins']} / 座位1胜 {b['seat1_wins']}"
+              f"，平均 {b.get('avg_moves')} 手")
+        if b.get("avg_duration"):
+            s += f"，平均用时 {b['avg_duration']}s"
+    return s
+
+
+def cmd_stats(scope: str = "all"):
+    """对局统计。scope: all | mine | api（api=外部调用方的 E 段对局）。"""
     games = load_games()
-    ai = [g for g in games if g.get("source") != "online_room"]
-    on = [g for g in games if g.get("source") == "online_room"]
+    if scope == "api":
+        games = [g for g in games if g.get("api") or g.get("_prefix") == "E"]
+    elif scope == "mine":
+        games = [g for g in games if not (g.get("api") or g.get("_prefix") == "E")]
+    st = stats_of(games)
+    if scope == "api":
+        print(f"对外 API 调用方对局：{_fmt_block(st['all'])}")
+        for name, b in sorted(st["by_caller"].items(), key=lambda kv: -kv[1]["games"]):
+            print(f"  · {name}：{_fmt_block(b)}")
+        for day, b in sorted(st["by_day"].items())[-7:]:
+            print(f"  {day}：{b['games']} 局（完成 {b['finished']}）")
+        print("  （座位0=调用方，座位1=AI）")
+        return
+    games_all = load_games()
+    ai = [g for g in games_all if not (g.get("api") or g.get("_prefix") == "E")
+          and g.get("source") != "online_room"]
+    on = [g for g in games_all if g.get("source") == "online_room"]
+    ext = [g for g in games_all if g.get("api") or g.get("_prefix") == "E"]
     print(f"人机局 {len(ai)} 局", end="")
     if ai:
         win = sum(1 for g in ai if g.get("winner") == 0)
@@ -355,6 +461,13 @@ def cmd_stats():
     print(f"\n真人局 {len(on)} 局")
     if on:
         print(f"  编号范围 {min(g['no'] for g in on)} ~ {max(g['no'] for g in on)}")
+    ex = stats_of(ext)
+    print(f"对外 API 局 {ex['all']['games']} 局", end="")
+    if ex["all"]["games"]:
+        print(f"（调用方胜 {ex['all']['seat0_wins']} / AI 胜 {ex['all']['seat1_wins']}）", end="")
+        for name, b in sorted(ex["by_caller"].items(), key=lambda kv: -kv[1]["games"])[:5]:
+            print("\n  · " + name + "：" + _fmt_block(b), end="")
+    print()
     recs = all_comments()
     print(f"人工点评 {len(recs)} 条" + (f"（涉及 {len(set(c['no'] for c in recs))} 局）" if recs else ""))
     print("数据目录:")
@@ -412,7 +525,7 @@ if __name__ == "__main__":
     if cmd == "list":
         cmd_list(pf)
     elif cmd == "stats":
-        cmd_stats()
+        cmd_stats(rest[0] if rest and rest[0] in ("all", "mine", "api") else "all")
     elif cmd == "show" and rest:
         cmd_show("latest" if rest[0] == "latest" else rest[0])
     elif cmd == "raw" and rest:

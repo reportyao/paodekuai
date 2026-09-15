@@ -19,6 +19,23 @@
 > 环境变量 `PDK_AI_RATE=0` 可关闭）。因为 8310 是 server.py 直接监听（不经 nginx），
 > 这一层限流放在应用内实现。
 >
+> **对外对局的记录与胜负统计（已实现）**
+>
+> - 编号独立成段：对外实例写 `E0001…`（主站人机 `A` / 在线 `H`），互不撞号
+> - 归属可查：网关按 API Key 注入调用方名（`X-PDK-Caller`，nginx 层清空客户端同名头防伪造），
+>   落盘字段：`caller`（调用方名）、`api: true`、`startedTs/endedTs`、`durationSec`
+> - 记录内容：双方初始手牌、底牌、逐手出牌（含具体牌面/牌型）、`winner`、`scores`、规则 `opts`
+> - **网页版查看**：大厅 →「📚 对局记录」→ 切到「对外调用（E）」，顶部显示汇总
+>   （局数 / 完成 / 调用方胜-AI胜 / 平均手数 / 平均用时 / 按调用方分组），点任意一局可进逐手复盘
+> - **接口/命令行**（便于接你自己的后台或做定时统计）：
+>   ```bash
+>   curl -s 'http://127.0.0.1:8310/replays/stats?scope=api'   # 对外：summary + by_caller + by_day + recent
+>   curl -s 'http://127.0.0.1:8310/replays/stats?scope=mine'  # 你自己的对局
+>   curl -s 'http://127.0.0.1:8310/replays/list?scope=api'    # 对外对局列表（含胜负/用时）
+>   cd /home/ubuntu/paodekuai && .venv/bin/python replay_report.py stats api   # 命令行文本报告
+>   ```
+>   字段口径：`seat0` = 调用方，`seat1` = AI；`seat0_wins` / `seat1_wins` / `avg_moves` / `avg_duration` 均为完成局口径。
+>
 > 三套自测（服务器上可直接跑，全绿）：
 > ```bash
 > cd /home/ubuntu/paodekuai

@@ -191,6 +191,9 @@ python3 -m json.tool "$(ls -t /home/ubuntu/paodekuai/data/replays/*.json | head 
   防脚本刷量耗尽 AI 算力；真人打牌实测峰值 42 次/分钟，不受影响
 - 自测（服务器可直接跑）：`selftest_api.py`(59 项) ・`selftest_core.py`(21 项，需 `PDK_BOT_ROOT`) ・
   `selftest_gateway.py`(18 项，需 `PDK_GW_KEY`)；三套在线上均全绿
+- 对外对局可管理：编号独立成段 `E0001…`，落盘带 `caller`（调用方名）/胜负/比分/时长；
+  网页版「📚 对局记录」可切到「对外调用（E）」看汇总与逐手复盘；
+  也可用 `GET /replays/stats?scope=api|mine` 或 `python replay_report.py stats api` 取数
 
 ## 🤖 AI 出牌解释（明牌看牌 + 复盘分析）
 

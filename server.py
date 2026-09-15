@@ -126,9 +126,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         q = urllib.parse.parse_qs(u.query)
         try:
             if u.path == "/replays/list":
+                scope = (q.get("scope") or ["mine"])[0]
                 cidx = replay_report.comments_index()
                 games = []
                 for d in replay_report.load_games():
+                    is_api = bool(d.get("api") or d.get("_prefix") == "E")
+                    if scope == "mine" and is_api:
+                        continue
+                    if scope == "api" and not is_api:
+                        continue
                     no = str(d.get("no", ""))
                     tag = (f"{d['code']}-r{d['round']}" if d.get("source") == "online_room"
                            else str(d.get("sid", d.get("_file", "")))[:10])
@@ -141,8 +147,34 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "result": replay_report.result_of(d),
                         "live": bool(d.get("live")),
                         "source": d.get("source", "ai_bridge"),
+                        "caller": d.get("caller") or ("API 调用方" if is_api else ""),
+                        "duration": d.get("durationSec"),
+                        "scope": "api" if is_api else "mine",
                     })
                 return {"games": games}
+
+            if u.path == "/replays/stats":
+                # 管理后台用的胜负汇总（含按调用方/按天分组）
+                scope = (q.get("scope") or ["mine"])[0]
+                games = []
+                for d in replay_report.load_games():
+                    is_api = bool(d.get("api") or d.get("_prefix") == "E")
+                    if scope == "mine" and is_api:
+                        continue
+                    if scope == "api" and not is_api:
+                        continue
+                    games.append(d)
+                st = replay_report.stats_of(games)
+                return {"scope": scope, "summary": st["all"],
+                        "by_caller": st["by_caller"], "by_day": st["by_day"],
+                        "recent": [{"no": g.get("no"), "time": replay_report.time_of(g),
+                                    "kind": replay_report.kind_of(g),
+                                    "caller": g.get("caller") or "",
+                                    "result": replay_report.result_of(g),
+                                    "moves": len(g.get("moves") or g.get("codes") or []),
+                                    "duration": g.get("durationSec"),
+                                    "live": bool(g.get("live"))}
+                                   for g in games[:20]]}
             if u.path == "/replays/get":
                 no = (q.get("no") or [""])[0]
                 d = replay_report.find_by_id(no)

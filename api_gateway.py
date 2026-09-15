@@ -43,6 +43,7 @@ import time
 import urllib.error
 import urllib.request
 from collections import defaultdict, deque
+from urllib.parse import quote
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -230,6 +231,8 @@ class Handler(BaseHTTPRequestHandler):
             target = ROUTES[route] + (("?" + query) if query else "")
             req = urllib.request.Request(UPSTREAM + target, data=body, method=method)
             req.add_header("Content-Type", "application/json")
+            # 调用方归属：按 Key 名注入（覆盖客户端自带的同名头；nginx 亦会清空该头）
+            req.add_header("X-PDK-Caller", quote(name, safe=""))
             try:
                 with urllib.request.urlopen(req, timeout=float(CFG.get("upstream_timeout", 60))) as r:
                     data, status = r.read(), r.status

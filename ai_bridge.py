@@ -220,6 +220,7 @@ REPLAY_DIR = Path(__file__).resolve().parent / "data" / "replays"
 REPLAY_DIR.mkdir(parents=True, exist_ok=True)
 
 PUBLIC_MODE = False          # --public-api：只暴露"无状态 + 整局对局"接口，不暴露网页版会话协议
+REPLAY_PREFIX = "A"         # 对局编号前缀（主站 A/H 由各自写入；对外实例用 E，便于统计区分）
 REPLAY_ON = True            # --no-replay 关闭对局落盘（公共实例可选）
 MAX_BODY = 1 << 20           # 请求体上限 1MB（超出 413）
 MAX_HISTORY = 500            # history/moves 条数上限（防超大请求打内存）
@@ -251,7 +252,7 @@ class Busy(ApiError):
 
 _ID_RE = re.compile(r"[A-Za-z0-9_-]{4,64}")
 _FILE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
-_NO_RE = re.compile(r"[AH][0-9]{3,6}")
+_NO_RE = re.compile(r"[AHE][0-9]{3,6}")
 
 
 def check_ident(v, what: str = "sid") -> str:
@@ -377,6 +378,14 @@ def write_replay(s: Shadow, live: bool):
         "winner": (None if live else s.game.winner),
         "scores": (None if live else list(s.game.scores or (0, 0))),
     }
+    if getattr(s, "caller", ""):                      # 外部调用方的对局：标注归属与耗时
+        payload["caller"] = s.caller
+        payload["api"] = True
+        payload["startedTs"] = getattr(s, "ts_iso", "")
+        payload["endedTs"] = ("" if live else time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                            time.gmtime(s.ended_ts or time.time())))
+        payload["durationSec"] = (None if live else round(
+            (s.ended_ts or time.time()) - s.created, 1))
     if not REPLAY_ON:
         return
     try:
@@ -393,6 +402,8 @@ def save_replay(sid: str, s: Shadow):
     """终局落盘（覆盖同编号文件，live 置 False）。"""
     if getattr(s, "saved", False) or not s.game.finished:
         return
+    if s.ended_ts is None:
+        s.ended_ts = time.time()
     write_replay(s, live=False)
     s.saved = True
 
@@ -413,8 +424,10 @@ class Shadow:
                  sid: str = "", reuse_no=None, reuse_file=None):
         self.created = time.time()
         self.last_used = self.created                     # 空闲回收依据
+        self.caller = ""                                  # 对外调用方名（来自网关 X-PDK-Caller）
+        self.ended_ts = None                              # 终局时间（统计用时用）
         self.sid = check_ident(sid or uuid.uuid4().hex[:12], "sid")
-        self.no = check_no(reuse_no) if reuse_no else allocate_no("A")            # 开局即定编号
+        self.no = check_no(reuse_no) if reuse_no else allocate_no(REPLAY_PREFIX)  # 开局即定编号
         self.file = check_file(reuse_file) if reuse_file else f"{self.sid}.json"  # 重同步复用同一文件
         self.time_text = time.strftime("%Y-%m-%d %H:%M:%S")
         self.ts_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -1232,6 +1245,7 @@ def do_new_game(p: dict):
     h0, h1, kitty, leader = _deal_new_game()
     gid = uuid.uuid4().hex[:24]                      # 96 位随机，防枚举
     s = Shadow([h0, h1], kitty, leader, opts, prod_mode=mode, sid=gid)
+    s.caller = str(p.get("_caller") or "")[:40]      # 由网关注入（服务端字段，客户端伪造无效）
     with LOCK:
         SESSIONS[gid] = s
     evict_old()
@@ -1421,6 +1435,11 @@ class Handler(BaseHTTPRequestHandler):
             u = urlparse(self.path)
             if PUBLIC_MODE and u.path not in PUBLIC_POST:
                 return self._json({"error": "该接口不在公开实例上提供"}, 404)
+            # 调用方归属：由网关按 API Key 注入（外部请求自带的同名头在 nginx 层被清空）
+            caller = self.headers.get("X-PDK-Caller") or ""
+            if caller:
+                from urllib.parse import unquote
+                payload["_caller"] = unquote(caller)
             if u.path == "/init":
                 body, code = handle_init(payload)
             elif u.path == "/action":
@@ -1532,14 +1551,21 @@ def main():
     ap.add_argument("--replay-dir", default="", help="对局落盘目录（对外实例建议 data/external）")
     ap.add_argument("--no-replay", dest="replay", action="store_false", default=True,
                     help="不落盘对局文件")
+    ap.add_argument("--no-prefix", default="", help="对局编号前缀（对外实例建议 E）")
     ap.add_argument("--max-sessions", type=int, default=0, help="会话上限（默认 500；对外实例 64）")
     ap.add_argument("--idle-ttl", type=float, default=0.0, help="会话空闲回收秒数")
     ap.add_argument("--decide-timeout", type=float, default=0.0, help="决策排队超时秒数")
     args = ap.parse_args()
 
-    global _ACT_SEM, PUBLIC_MODE, MAX_SESSIONS, REPLAY_DIR, IDLE_TTL, DECIDE_TIMEOUT, REPLAY_ON
+    global _ACT_SEM, PUBLIC_MODE, MAX_SESSIONS, REPLAY_DIR, IDLE_TTL, DECIDE_TIMEOUT, REPLAY_ON, REPLAY_PREFIX
     PUBLIC_MODE = bool(args.public_api)
     REPLAY_ON = bool(args.replay)
+    if args.no_prefix:
+        REPLAY_PREFIX = str(args.no_prefix)[:1].upper() or "A"
+        if REPLAY_PREFIX not in ("A", "H", "E"):
+            raise SystemExit("--no-prefix 只支持 A / H / E")
+    elif PUBLIC_MODE:
+        REPLAY_PREFIX = "E"                            # 对外实例默认 E 段，统计上一眼可辨
     if args.max_sessions:
         MAX_SESSIONS = max(1, int(args.max_sessions))
     elif PUBLIC_MODE:

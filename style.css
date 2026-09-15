@@ -365,6 +365,10 @@ button { font-family: inherit; }
 .rv-explain .cand { color: #cfe6ff; }
 .rv-explain .warn { color: #ffb35c; }
 .rv-explain .rv-same { color: #7ee0a8; }
+.rv-scope { display: flex; gap: 8px; margin: 6px 0 8px; }
+.rv-scope .btn.active { background: rgba(90, 190, 130, .22); border-color: rgba(120, 230, 170, .55); color: #d8ffe8; }
+.hs-stats { font-size: 12.5px; color: #cfe3d8; opacity: .92; margin: 0 0 10px; line-height: 1.7; }
+.hs-stats b { color: #ffd88e; }
 .rv-explain .rv-diff { color: #ffb35c; }
 .explain-loading { color: #9fc7e8; font-size: 12px; }
 @media (max-width: 760px) {
