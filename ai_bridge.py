@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 import argparse
+import collections
 import contextlib
 import json
 import os
@@ -718,6 +719,7 @@ def do_act(sid: str):
             with decide_gate():                  # 并发闸（带超时）：多局并发排队，外部请求不无限等
                 code = s.agent.act(s.cg)
             code = _legal_or_fallback(s, code)   # 内核非法手防御（不写非法手进牌谱）
+            note_decision(getattr(s.agent, "last_explain", None))
             _dt = time.perf_counter() - _t0
             if _dt > 3.0:                        # 慢决策（多为 CPU 被其他作业抢占）留痕便于排查
                 print(f"[bridge] SLOW act {_dt:.1f}s (session {sid[:8]})", file=sys.stderr, flush=True)
@@ -1111,6 +1113,7 @@ def do_decide(p: dict):
     cfg = build_cfg(check_opts(p.get("opts")))
     with decide_gate():
         out = _decide_core(p, cfg, mode)
+    note_decision({"path": out.get("decision_path")})
     out["mode"] = mode
     out["engine"] = prod_solver_kw().get("engine", "c")
     try:
@@ -1217,9 +1220,11 @@ def _decide_core(payload: dict, cfg, mode: str = "hybrid") -> dict:
         if mv_code not in set(legal):
             mv_code = legal[0]
     cards = list(fast.code_to_cards(mv_code, sorted(my_ids))) if mv_code else []
-    out = {"move": cards, "pass": mv_code == 0, "legal_count": len(legal)}
+    ex = getattr(ag, "last_explain", None) or {}
+    out = {"move": cards, "pass": mv_code == 0, "legal_count": len(legal),
+           "decision_path": ex.get("path")}
     if payload.get("explain"):
-        out["explain"] = getattr(ag, "last_explain", {})
+        out["explain"] = ex
     return out
 
 
@@ -1302,6 +1307,7 @@ def _advance_ai(s: Shadow) -> int:
         with decide_gate():
             code = s.agent.act(s.cg)
         code = _legal_or_fallback(s, code)           # 内核非法手防御
+        note_decision(getattr(s.agent, "last_explain", None))
         cards = list(fast.code_to_cards(code, s.game.hand_ids(s.ai_seat)))
         s.capture_explain(code, cards)               # 明牌/复盘可即时读取
         s._apply(code)
@@ -1393,19 +1399,211 @@ def session_sweeper(interval: float = 300.0):
 
 
 
+# ---------------- 可观测性: 指标 / 审计日志 / 金丝雀 ----------------
+API_LOG_DIR = Path(__file__).resolve().parent / "data" / "api_log"
+API_LOG_DIR.mkdir(parents=True, exist_ok=True)
+_MET_LOCK = threading.Lock()
+_MET = {
+    "ep": {},                 # endpoint -> [count, bad]
+    "lat": {},                # endpoint -> [ms] (环形 512)
+    "err": {},                # "类型:端点" -> n
+    "paths": {},              # 决策路径 -> n（近 500 次）
+    "decisions": 0,
+}
+_PATHS_DEQ = collections.deque(maxlen=500)
+
+
+def _pct(vals, q):
+    if not vals:
+        return None
+    xs = sorted(vals)
+    return xs[min(len(xs) - 1, int(len(xs) * q))]
+
+
+def met_record(ep, ms, status, rid, dpath=None, nlegal=None, err=None):
+    """滚动指标 + 审计日志（一请求一行 JSONL，rid 贯穿前后端）。"""
+    with _MET_LOCK:
+        e = _MET["ep"].setdefault(ep, [0, 0])
+        e[0] += 1
+        if status >= 400:
+            e[1] += 1
+        lat = _MET["lat"].setdefault(ep, [])
+        lat.append(round(ms, 1))
+        if len(lat) > 512:
+            del lat[: len(lat) - 512]
+        if err:
+            k = f"{err}:{ep}"
+            _MET["err"][k] = _MET["err"].get(k, 0) + 1
+        if dpath:
+            _MET["paths"][dpath] = _MET["paths"].get(dpath, 0) + 1
+            _PATHS_DEQ.append(dpath)
+            _MET["decisions"] += 1
+    try:
+        import datetime as _dt
+        line = json.dumps({
+            "ts": _dt.datetime.now().isoformat(timespec="milliseconds"),
+            "ep": ep, "ms": round(ms, 1), "status": status, "rid": rid,
+            **({"path": dpath} if dpath else {}),
+            **({"nlegal": nlegal} if nlegal is not None else {}),
+            **({"err": err} if err else {}),
+        }, ensure_ascii=False)
+        with open(API_LOG_DIR / f"{_dt.date.today().isoformat()}.jsonl", "a",
+                  encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
+
+def met_snapshot() -> dict:
+    with _MET_LOCK:
+        eps = {}
+        for ep, (n, bad) in _MET["ep"].items():
+            lat = _MET["lat"].get(ep, [])
+            eps[ep] = {"n": n, "bad": bad,
+                       "ms_p50": _pct(lat, 0.5), "ms_p95": _pct(lat, 0.95),
+                       "ms_max": max(lat) if lat else None}
+        return {"endpoints": eps, "errors": dict(_MET["err"]),
+                "decision_paths": dict(_MET["paths"]),
+                "decisions": _MET["decisions"]}
+
+
+def note_decision(explain: dict | None):
+    """把一次决策的路径汇入指标（联调时看"各部分是否真实运作"）。"""
+    dpath = (explain or {}).get("path")
+    if dpath:
+        with _MET_LOCK:
+            _MET["paths"][dpath] = _MET["paths"].get(dpath, 0) + 1
+            _PATHS_DEQ.append(dpath)
+            _MET["decisions"] += 1
+
+
+def component_probes() -> dict:
+    """组件探针：C 核心 / fallback 网络 / 生产智能体（真实构建，非静态标志）。"""
+    comp = {}
+    try:
+        v = fast.solve_batch_n([([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                                 [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                                 0, None, (0, 0))], bot_server.CFG, 100000)[0]
+        comp["c_core"] = {"ok": v[0] != -101, "probe": v[0]}
+    except Exception as e:
+        comp["c_core"] = {"ok": False, "err": repr(e)[:80]}
+    try:
+        fb = bot_server._QFB()
+        comp["fallback_net"] = {"ok": True,
+                                "kind": "a2c56" if getattr(fb, "use_x", False)
+                                else "dmc-v1"}
+        if getattr(fb, "use_x", False) is not True:
+            comp["fallback_net"]["warn"] = "已回退旧网络（不降级策略下会拒绝服务）"
+    except Exception as e:
+        comp["fallback_net"] = {"ok": False, "err": repr(e)[:80]}
+    try:
+        agent, mode, _ = build_prod_agent("hybrid")
+        kw = prod_solver_kw()
+        comp["prod_agent"] = {"ok": True, "mode": mode,
+                              "kw": {k: v for k, v in kw.items()
+                                     if k in ("engine", "num_threshold",
+                                              "exact_worlds_total", "node_cap")}}
+    except Exception as e:
+        comp["prod_agent"] = {"ok": False, "err": repr(e)[:80]}
+    return comp
+
+
+def run_selftest() -> dict:
+    """金丝雀：固定场景走真实决策路径，断言"记牌→穷举→数值→顶牌"链路。
+
+    用例与上游 server._selftest 同源（fixture 取自真实牌谱 A0519）。
+    """
+    results = []
+
+    def case(name, fn):
+        t0 = time.perf_counter()
+        try:
+            detail = fn()
+            results.append({"name": name, "ok": True,
+                            "ms": round((time.perf_counter() - t0) * 1000, 1),
+                            **(detail or {})})
+        except Exception as e:
+            results.append({"name": name, "ok": False,
+                            "ms": round((time.perf_counter() - t0) * 1000, 1),
+                            "err": f"{type(e).__name__}: {e}"})
+
+    # 场景 1: A0519 ply10 —— 必须顶牌（Q/K/A），一条用例贯穿"记牌→穷举→数值→选择"
+    def s_a0519():
+        hand_ids = [2, 13, 19, 21, 24, 27, 29, 39, 42, 44]   # 3 6 7 8 99 X Q K A
+        hist = [
+            {"seat": 0, "move": [1, 3, 4, 5], "pass_on": None},
+            {"seat": 1, "move": [6, 7, 8, 9], "pass_on": None},
+            {"seat": 0, "move": [16, 18, 20, 23], "pass_on": None},
+            {"seat": 1, "move": [], "pass_on": None},
+            {"seat": 0, "move": [25, 26], "pass_on": None},
+            {"seat": 1, "move": [32, 33], "pass_on": None},
+            {"seat": 0, "move": [36, 37], "pass_on": None},
+            {"seat": 1, "move": [], "pass_on": None},
+            {"seat": 0, "move": [10], "pass_on": None}]
+        out, code = do_decide({"my_hand": hand_ids, "opp_n": 3,
+                               "trick": [0, 2, 1, 0], "history": hist})
+        if code != 200:
+            raise AssertionError(f"decide 失败: {out}")
+        cards = out.get("move") or []
+        played = sorted(c >> 2 for c in cards) if cards else []
+        if not (played and played[0] >= 10):
+            raise AssertionError(f"未顶牌: 出了 rank={played}")
+        note_decision((out.get("explain") or {}) or None)
+        return {"move": out.get("move"), "legal_count": out.get("legal_count"),
+                "check": "A0519 顶牌（记牌→穷举→数值 链路）"}
+
+    def s_must_beat():
+        out, code = do_decide({"my_hand": [44], "opp_n": 1,
+                               "trick": [0, 5, 1, 0], "history": []})
+        if code != 200 or not out.get("move"):
+            raise AssertionError("未返回动作")
+        note_decision((out.get("explain") or {}) or None)
+        return {"move": out["move"], "check": "必压/forced 链路"}
+
+    def s_lead():
+        out, code = do_decide({"my_hand": [44], "opp_n": 1, "trick": None,
+                               "history": []})
+        if code != 200 or "legal_count" not in out:
+            raise AssertionError("领出 decide 异常")
+        return {"check": "领出 decide 正常"}
+
+    def s_bad():
+        try:
+            do_decide({"my_hand": [], "opp_n": 0, "trick": None, "history": []})
+        except ApiError as e:
+            if e.status != 400:
+                raise AssertionError(f"空手牌应 400，实际 {e.status}")
+            return {"check": "错误契约（400 + type + rid）"}
+        raise AssertionError("空手牌未被拒绝")
+
+    case("decide_schema", s_lead)
+    case("a0519_top", s_a0519)
+    case("must_beat", s_must_beat)
+    case("error_contract", s_bad)
+    return {"ok": all(x["ok"] for x in results), "cases": results,
+            "hint": "任一 case 失败 => 对应链路异常；先看 /health 的 components，"
+                    "再按 rid 查 data/api_log/<日期>.jsonl"}
+
+
 PUBLIC_GET = {"/health", "/api/state"}
 PUBLIC_POST = {"/api/decide", "/api/explain", "/api/analyze", "/api/decode",
-               "/api/new_game", "/api/play", "/api/suggest"}
+               "/api/new_game", "/api/play", "/api/suggest", "/api/selftest"}
 
 
 class Handler(BaseHTTPRequestHandler):
-    def _json(self, obj, code=200, headers: dict | None = None):
+    def _json(self, obj, code=200, headers: dict | None = None, rid: str | None = None):
+        if isinstance(obj, dict) and rid:
+            obj = dict(obj)
+            obj.setdefault("rid", rid)
         data = json.dumps(obj).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Access-Control-Allow-Origin", "*")   # 网页版跨域调用
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Request-Id")
+        self.send_header("Access-Control-Expose-Headers", "X-Request-Id")
+        if rid:
+            self.send_header("X-Request-Id", rid)
         for k, v in (headers or {}).items():
             self.send_header(str(k), str(v))
         self.end_headers()
@@ -1423,17 +1621,27 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        t0 = time.perf_counter()
+        rid = self.headers.get("X-Request-Id") or f"r{time.time_ns() % 10**10}"
+        status_holder = {"code": 200}
         try:
             u = urlparse(self.path)
             if PUBLIC_MODE and u.path not in PUBLIC_GET:
-                return self._json({"error": "该接口不在公开实例上提供"}, 404)
+                status_holder["code"] = 404
+                met_record(u.path, (time.perf_counter()-t0)*1000, 404, rid, err="NotFound")
+                return self._json({"error": "该接口不在公开实例上提供", "rid": rid}, 404)
             if u.path == "/health":
                 with LOCK:
                     n = len(SESSIONS)
-                body = {"ok": True, "agent": "prod",
+                comp = component_probes()
+                body = {"ok": bool(all(c.get("ok") for c in comp.values())),
+                        "agent": "prod",
                         "productionModel": "ckpt/policy_a2c_final56.pt",
                         "modes": sorted(PROD_MODES),
-                        "sessions": n, "v": 8,
+                        "components": comp,
+                        "metrics": met_snapshot(),
+                        "selftest": "POST /api/selftest（金丝雀：记牌→穷举→数值→顶牌链路）",
+                        "sessions": n, "v": 9,
                         "restoring": bool(RESTORING),
                         "maxSessions": MAX_SESSIONS,
                         "liveSessions": sum(1 for x in SESSIONS.values()
@@ -1488,32 +1696,47 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"seat": seat, "turn": int(s.game.turn),
                                 "legal": s.legal_ids(seat)})
             else:
-                self._json({"error": "unknown endpoint"}, 404)
+                status_holder["code"] = 404
+                self._json({"error": "unknown endpoint", "rid": rid}, 404, rid=rid)
+                return
         except ApiError as e:
-            self._json({"error": str(e)}, e.status, e.extra)
+            status_holder["code"] = e.status
+            self._json({"error": str(e)}, e.status, e.extra, rid=rid)
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
+            status_holder["code"] = 500
             print(f"[bridge] GET {self.path} 失败: {tb[-800:]}", file=sys.stderr, flush=True)
             body = {"error": f"{type(e).__name__}: {e}"}
             if not PUBLIC_MODE:
                 body["tb"] = tb[-1200:]
-            self._json(body, 500)
+            self._json(body, 500, rid=rid)
+        finally:
+            met_record(urlparse(self.path).path, (time.perf_counter()-t0)*1000,
+                       status_holder["code"], rid)
 
     def do_POST(self):
+        t0 = time.perf_counter()
+        rid = self.headers.get("X-Request-Id") or f"r{time.time_ns() % 10**10}"
+        status_holder = {"code": 200, "dpath": None, "nlegal": None, "err": None}
         try:
             try:
                 n = int(self.headers.get("Content-Length", 0) or 0)
             except (TypeError, ValueError):
                 n = 0
             if n > MAX_BODY:
-                return self._json({"error": f"请求体过大（{n} 字节 > 上限 {MAX_BODY}）"}, 413)
+                status_holder["code"] = 413
+                return self._json({"error": f"请求体过大（{n} 字节 > 上限 {MAX_BODY}）",
+                                   "type": "TooLarge", "rid": rid}, 413, rid=rid)
             payload = json.loads(self.rfile.read(n) or b"{}")
             if not isinstance(payload, dict):
                 raise ApiError("请求体必须是 JSON 对象")
+            rid = (payload.get("rid") if isinstance(payload, dict) else None) or rid
             u = urlparse(self.path)
             if PUBLIC_MODE and u.path not in PUBLIC_POST:
-                return self._json({"error": "该接口不在公开实例上提供"}, 404)
+                status_holder["code"] = 404
+                return self._json({"error": "该接口不在公开实例上提供",
+                                   "type": "NotFound", "rid": rid}, 404, rid=rid)
             # 调用方归属：由网关按 API Key 注入（外部请求自带的同名头在 nginx 层被清空）
             caller = self.headers.get("X-PDK-Caller") or ""
             if caller:
@@ -1526,7 +1749,7 @@ class Handler(BaseHTTPRequestHandler):
                                      int(payload.get("seat", 0)),
                                      payload.get("cards", []))
                 body, code = (({"ok": True, **(info if isinstance(info, dict) else {})}, 200)
-                              if ok else ({"error": info}, 400))
+                              if ok else ({"error": info, "type": "BadRequest"}, 400))
             elif u.path == "/act":
                 body, code = do_act(payload["sid"])
             elif u.path in ("/suggest", "/api/suggest"):
@@ -1541,25 +1764,52 @@ class Handler(BaseHTTPRequestHandler):
                 body, code = do_explain(payload)
             elif u.path == "/api/analyze":
                 body, code = do_analyze(payload)
+            elif u.path == "/api/selftest":
+                body, code = run_selftest(), 200
             elif u.path == "/api/decode":
                 body, code = do_decode(payload)
             else:
-                body, code = {"error": "unknown endpoint"}, 404
-            self._json(body, code)
+                status_holder["code"] = 404
+                body, code = {"error": "unknown endpoint", "type": "NotFound"}, 404
+            if isinstance(body, dict):
+                ex = body.get("explain")
+                status_holder["dpath"] = (body.get("decision_path")
+                                          or (ex.get("path") if isinstance(ex, dict) else None))
+                if u.path == "/api/decide":
+                    status_holder["nlegal"] = body.get("legal_count")
+                if code >= 400:
+                    status_holder["err"] = body.get("type") or "Error"
+            status_holder["code"] = code
+            self._json(body, code, rid=rid)
         except ApiError as e:
-            self._json({"error": str(e)}, e.status, e.extra)
+            status_holder["code"] = e.status
+            status_holder["err"] = "ApiError"
+            self._json({"error": str(e), "type": "ApiError"}, e.status, e.extra, rid=rid)
         except KeyError as e:
-            self._json({"error": f"缺少参数 {e}"}, 400)
+            status_holder["code"] = 404
+            status_holder["err"] = "NotFound"
+            self._json({"error": f"缺少字段/资源: {e}", "type": "NotFound", "rid": rid},
+                       404, rid=rid)
         except json.JSONDecodeError as e:
-            self._json({"error": f"JSON 解析失败: {e}"}, 400)
+            status_holder["code"] = 400
+            status_holder["err"] = "JSONDecodeError"
+            self._json({"error": f"非法 JSON: {e}", "type": "JSONDecodeError", "rid": rid},
+                       400, rid=rid)
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
+            status_holder["code"] = 500
+            status_holder["err"] = type(e).__name__
             print(f"[bridge] POST {self.path} 失败: {tb[-800:]}", file=sys.stderr, flush=True)
-            body = {"error": f"{type(e).__name__}: {e}"}
+            body = {"error": f"{type(e).__name__}: {e}", "type": type(e).__name__}
             if not PUBLIC_MODE:
                 body["tb"] = tb[-1500:]
-            self._json(body, 500)
+            self._json(body, 500, rid=rid)
+        finally:
+            met_record(urlparse(self.path).path, (time.perf_counter()-t0)*1000,
+                       status_holder["code"], rid,
+                       dpath=status_holder["dpath"], nlegal=status_holder["nlegal"],
+                       err=status_holder["err"])
 
 
 def preflight():

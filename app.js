@@ -460,18 +460,69 @@ function bridgeEnqueue(fn) {
   return run;
 }
 
+/* 每次 AI 调用生成 rid（请求 id）：响应原样回显，服务端审计日志按它可检索。
+   出问题时弹窗会显示最近一次 rid，把 rid 报给服务方即可精确定位那一次调用。 */
+function newRid() {
+  return 'web-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+}
 async function bridgeApi(path, body, timeoutMs = 15000) {
   const ctl = new AbortController();
   const tm = setTimeout(() => ctl.abort(), timeoutMs);
+  const rid = newRid();
+  bridge.lastRid = rid;
   try {
     const r = await fetch(AI_BRIDGE + path, {
       method: body !== undefined ? 'POST' : 'GET',
-      headers: { 'Content-Type': 'application/json' },
-      body: body !== undefined ? JSON.stringify(body) : undefined,
+      headers: { 'Content-Type': 'application/json', 'X-Request-Id': rid },
+      body: body !== undefined ? JSON.stringify(body === null ? {} : body) : undefined,
       signal: ctl.signal,
     });
-    return await r.json();
+    const j = await r.json();
+    if (j && j.rid) bridge.lastRid = j.rid;         // 服务端回显的 rid（与本地一致即链路对得上）
+    return j;
+  } catch (e) {
+    bridge.lastRid = rid;                           // 失败也保留，便于报障
+    throw e;
   } finally { clearTimeout(tm); }
+}
+
+/* 链路自检：POST /api/selftest 金丝雀（记牌→穷举→数值→顶牌 真实决策路径断言）+ 组件探针 */
+const SELFTEST_CN = {
+  decide_schema: '领出决策正常',
+  a0519_top: '顶牌链路（记牌→穷举→数值计分）',
+  must_beat: '有牌必压链路',
+  error_contract: '错误契约（400 + 类型 + rid）',
+};
+async function runSelftest() {
+  const box = $('selftest-box');
+  const btn = $('btn-selftest');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ 自检中…（约 4 秒）'; }
+  if (box) box.innerHTML = '<div class="st-line dim">正在跑链路自检（真实决策路径断言）…</div>';
+  try {
+    const [st, hd] = await Promise.all([
+      bridgeApi('/api/selftest', {}, 60000).catch(e => ({ error: String(e) })),
+      bridgeApi('/health', undefined, 10000).catch(() => null),
+    ]);
+    const comp = (hd && hd.components) || {};
+    const bits = [];
+    const compBits = Object.entries(comp).map(([k, v]) =>
+      `${v.ok ? '✅' : '❌'} ${{ c_core: 'C 求解核心', fallback_net: '生产网络', prod_agent: '生产智能体' }[k] || k}`);
+    bits.push(`<div class="st-line">组件：${compBits.join('　') || '<span class="dim">不可用</span>'}</div>`);
+    if (hd && hd.pdkCommit && hd.pdkCommit.hash)
+      bits.push(`<div class="st-line dim">内核版本 ${esc(hd.pdkCommit.hash)} ｜ 引擎 ${((hd.productionConfig || {}).engine || '?')} ｜ 残局穷举 ≤${((hd.productionConfig || {}).exactWorldsTotal) || 0} 张</div>`);
+    if (st && st.cases) {
+      bits.push(...st.cases.map(c =>
+        `<div class="st-line">${c.ok ? '✅' : '❌'} ${esc(SELFTEST_CN[c.name] || c.name)} <span class="dim">${c.ms}ms${c.ok ? '' : ' — ' + esc(String(c.err || '').slice(0, 90))}</span></div>`));
+      bits.push(`<div class="st-line ${st.ok ? 'st-ok' : 'st-bad'}">${st.ok ? '🎉 链路自检全部通过：AI 各组件都在真实运作' : '⚠️ 有链路异常：请把上面的失败项与 rid 报给服务方'}</div>`);
+    } else {
+      bits.push('<div class="st-line st-bad">❌ 自检接口不可达（AI 服务未连接？）</div>');
+    }
+    bits.push(`<div class="st-line dim">本次 rid：${esc((st && st.rid) || bridge.lastRid || '-')}</div>`);
+    if (box) box.innerHTML = bits.join('');
+    return st;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🩺 链路自检'; }
+  }
 }
 async function bridgeHealth() {
   try { const r = await bridgeApi('/health', undefined, 8000); return !!r.ok; } catch { return false; }   // 跨海链路：3s 太短会误判为未连接
@@ -712,7 +763,9 @@ function aiError(msg) {
     `<div class="res-line"><span class="k">当前状态</span><span class="v">对局已暂停：电脑<b>不会</b>用内置 AI 代打；恢复后自动继续</span></div>` +
     `<div class="res-line"><span class="k">诊断</span><span class="v">` +
     `桥：${bridge.ready ? '已连接' : '未连接'}${bridge.no ? ' ｜ 本局 ' + bridge.no : ''}` +
-    `${bridge.lastErr ? ' ｜ 最近错误：' + String(bridge.lastErr).slice(0, 120) : ''}</span></div>`;
+    `${bridge.lastErr ? ' ｜ 最近错误：' + String(bridge.lastErr).slice(0, 120) : ''}</span></div>` +
+    `<div class="res-line"><span class="k">请求 id</span><span class="v"><code>${String(bridge.lastRid || '-').replace(/[<>]/g, '')}</code>` +
+    `（报障时提供它，服务方可按 rid 精确定位该次调用）</span></div>`;
   $('btn-next').classList.add('hidden');
   $('btn-rematch').classList.add('hidden');
   $('btn-back-lobby').classList.remove('hidden');
@@ -1928,6 +1981,7 @@ function initLobby() {
   $('btn-on-join').addEventListener('click', onlineJoin);
   $('on-code').addEventListener('keydown', e => { if (e.key === 'Enter') onlineJoin(); });
   $('btn-history-lobby').addEventListener('click', showReplayHistory);
+  $('btn-selftest').addEventListener('click', () => runSelftest());
   $('btn-history-close').addEventListener('click', () => $('history-modal').classList.add('hidden'));
   $('hs-mine').addEventListener('click', () => showReplayHistory('mine'));
   $('hs-api').addEventListener('click', () => showReplayHistory('api'));

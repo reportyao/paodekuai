@@ -56,7 +56,13 @@ check("张数自洽（我方 16 张、对手 <=16、均在 0..16）",
       g.get("my_n") == 16 and 0 <= (g.get("opp_n") or 0) <= 16,
       (g.get("my_n"), g.get("opp_n")))
 check("轮到调用方且 legal 非空", len(g.get("legal") or []) > 0, len(g.get("legal") or []))
-check("legal_pass=false（有牌必打）", g.get("legal_pass") is False, g.get("legal_pass"))
+L = g.get("legal") or []
+check("legal_pass 与 legal 一致（含过牌当且仅当无牌可压）",
+      g.get("legal_pass") == any(len(x) == 0 for x in L),
+      (g.get("legal_pass"), len(L)))
+check("有牌可压时 legal_pass 必为 false",
+      (not L) or g.get("legal_pass") is False or any(len(x) == 0 for x in L),
+      (len(L), g.get("legal_pass")))
 check("opts 回显", (g.get("opts") or {}).get("red10") is True, g.get("opts"))
 check("含 new 标记", g.get("new") is True, g)
 

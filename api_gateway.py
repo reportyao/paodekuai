@@ -58,6 +58,7 @@ ROUTES = {
     "play": "/api/play",
     "state": "/api/state",
     "suggest": "/api/suggest",
+    "selftest": "/api/selftest",
 }
 ANON_ROUTES = {"health"}          # 不需要 Key（监控/探活用），但仍受限流约束
 
