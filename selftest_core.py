@@ -10,7 +10,11 @@ import os
 import random
 import sys
 
-sys.argv = ["x", "--bot-root", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pdk-ai-prod2")]
+BOT_ROOT = os.environ.get(
+    "PDK_BOT_ROOT",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pdk-ai-prod2"))
+sys.argv = ["x", "--bot-root", BOT_ROOT]
+print(f"[selftest_core] bot-root = {BOT_ROOT}")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ai_bridge as B                                                   # noqa: E402
 from pdk.engine import Game, counts_of_ids                              # noqa: E402
@@ -24,8 +28,9 @@ def check(name, cond, detail=""):
 
 
 print("=== 1) _decide_core 与上游 _decide 等价性（同 cfg）===")
+REPLAYS = os.environ.get("PDK_REPLAYS", "data/replays")
 reps = []
-for f in sorted(glob.glob("data/replays/*.json")):
+for f in sorted(glob.glob(os.path.join(REPLAYS, "*.json"))):
     try:
         d = json.load(open(f, encoding="utf-8"))
     except Exception:

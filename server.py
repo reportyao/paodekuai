@@ -11,6 +11,8 @@ import json
 import os
 import socketserver
 import sys
+import threading
+import time
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -20,6 +22,33 @@ PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8310
 AI_UPSTREAM = os.environ.get('PDK_AI_BRIDGE', 'http://127.0.0.1:8766').rstrip('/')
 ONLINE_UPSTREAM = os.environ.get('PDK_ONLINE', 'http://127.0.0.1:8311').rstrip('/')
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
+
+# ---- /ai/* 代理限流（保护 AI 算力：8310 不经 nginx，所以在这一层做）----
+# 网页版正常打牌约 1-3 请求/秒（含镜像+决策+提示），这里给到 300 次/分钟/IP 的宽松额度，
+# 只拦"扫描/刷量/脚本滥用"；设 PDK_AI_RATE=0 可完全关闭。
+AI_RATE_PER_MIN = int(os.environ.get('PDK_AI_RATE', '300'))
+AI_RATE_LOCK = threading.Lock()
+AI_HITS: dict = {}                      # ip -> [时间戳...]
+
+
+def ai_rate_limited(ip: str) -> bool:
+    """滑动 60 秒窗口计数；超限返回 True。"""
+    if AI_RATE_PER_MIN <= 0:
+        return False
+    now = time.time()
+    with AI_RATE_LOCK:
+        hits = AI_HITS.setdefault(ip, [])
+        cutoff = now - 60
+        while hits and hits[0] < cutoff:
+            hits.pop(0)
+        if len(hits) >= AI_RATE_PER_MIN:
+            return True
+        hits.append(now)
+        if len(AI_HITS) > 5000:         # 防内存膨胀：清理空桶
+            for k in [k for k, v in AI_HITS.items() if not v]:
+                AI_HITS.pop(k, None)
+        return False
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -51,6 +80,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def _proxy(self, upstream, strip):
         import urllib.error
+        if strip == '/ai' and ai_rate_limited(self.client_address[0]):
+            body = json.dumps({'error': f'请求过于频繁（每 IP 每分钟 {AI_RATE_PER_MIN} 次），'
+                                        f'请稍后重试'}).encode()
+            self.send_response(429)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Retry-After', '10')
+            self.end_headers()
+            self.wfile.write(body)
+            print(f'[rate] 429 {self.client_address[0]} {self.path}', flush=True)
+            return
         target = upstream + self.path[len(strip):]
         n = int(self.headers.get('Content-Length', 0) or 0)
         body = self.rfile.read(n) if n else None

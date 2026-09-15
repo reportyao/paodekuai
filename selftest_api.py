@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+import os
+
 """HTTP 自测：整局对局 API + 无状态接口 + 负例 + 既有网页版接口回归。
 
 用法：先启动桥接（python ai_bridge.py --bot-root ../pdk-ai-prod2），再 python selftest_api.py
@@ -9,7 +11,9 @@ import time
 import urllib.error
 import urllib.request
 
-B = "http://127.0.0.1:8766"
+B = os.environ.get("PDK_API_BASE", "http://127.0.0.1:8766").rstrip("/")
+if not B.endswith("/ai") and "127.0.0.1:8310" in B:
+    B += "/ai"
 OK = []
 BAD = []
 

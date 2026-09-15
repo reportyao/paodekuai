@@ -187,6 +187,10 @@ python3 -m json.tool "$(ls -t /home/ubuntu/paodekuai/data/replays/*.json | head 
 - 审计：`/var/log/paodekuai-api.log`（时间/Key名/接口/状态/耗时，不含明文 Key）
 - 文档：[docs/AI_API.md](docs/AI_API.md)（给调用方）；[docs/API开放方案.md](docs/API开放方案.md)（架构与运维）
 - 数据隔离：对外牌局落盘 `data/external/`，主站对局记录与人工点评不受影响
+- 主站入口加固：`server.py` 对 `/ai/*` 代理加了按 IP 限流（默认 300 次/分钟，`PDK_AI_RATE=0` 关闭），
+  防脚本刷量耗尽 AI 算力；真人打牌实测峰值 42 次/分钟，不受影响
+- 自测（服务器可直接跑）：`selftest_api.py`(59 项) ・`selftest_core.py`(21 项，需 `PDK_BOT_ROOT`) ・
+  `selftest_gateway.py`(18 项，需 `PDK_GW_KEY`)；三套在线上均全绿
 
 ## 🤖 AI 出牌解释（明牌看牌 + 复盘分析）
 

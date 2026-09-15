@@ -14,6 +14,19 @@
 > | 回滚 | 注释 nginx `location /pdk-ai/` → `nginx -t && systemctl reload nginx`；或 `sudo systemctl stop paodekuai-api pdkai-gateway` |
 > | 待办 | ① 调用方出口 IP 固定的话把 IP 填进 `allowed_ips`（改完自动热加载，无需重启）；② 若对方要多并发/更高配额，再评估独立节点 |
 >
+> 另已顺手加固主站入口（第 4 节步骤 6）：`server.py` 的 `/ai/*` 代理加了**按 IP 限流**
+> （默认 300 次/分钟/IP，实测真人打牌峰值 42 次/分钟，7 倍余量；静态资源不受影响；
+> 环境变量 `PDK_AI_RATE=0` 可关闭）。因为 8310 是 server.py 直接监听（不经 nginx），
+> 这一层限流放在应用内实现。
+>
+> 三套自测（服务器上可直接跑，全绿）：
+> ```bash
+> cd /home/ubuntu/paodekuai
+> .venv/bin/python selftest_api.py                     # 59 项：整局对局 + 无状态接口 + 负例 + 网页版会话链路
+> PDK_BOT_ROOT=/home/ubuntu/pdk-ai-prod .venv/bin/python selftest_core.py   # 21 项：决策内核等价性/续打/计分/防穿越
+> PDK_GW_KEY="$(python3 -c "import json;print(list(json.load(open('/etc/paodekuai-api/keys.json'))['keys'])[0])")" >   PDK_GW_LOG=/var/log/paodekuai-api.log .venv/bin/python selftest_gateway.py   # 18 项：鉴权/配额/路由/审计
+> ```
+>
 > 常用运维命令：
 > ```bash
 > sudo systemctl status paodekuai-api pdkai-gateway
