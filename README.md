@@ -169,6 +169,48 @@ python3 -m json.tool "$(ls -t /home/ubuntu/paodekuai/data/replays/*.json | head 
 
 - 网页 API：`GET /replays/list`、`GET /replays/get?no=H0002`、`POST /replays/comment {no,text,ply}`。
 
+## 🤖 AI 出牌解释（明牌看牌 + 复盘分析）
+
+AI 模型自带解释能力（pdk-ai 的 `POST /api/explain`、`POST /api/decide` + `"explain": true`），网页版把它接到两个场景：
+
+**1）人机对局「👁 明牌」时：AI 每出一手，牌桌上方自动给出这手的依据**
+
+```
+🤖 局面：我剩 15 张, 对手剩 14 张; 台上: 单张7
+   AI 出牌 单张Q
+   依据 残局求解(定胜负)
+   理由 在 32 个采样世界里求解, 单张Q 的胜率最高 (62%)。 次优: 单张J 58%
+   候选 单张J 58%、单张10 44%
+   算牌 对手高置信至少 2 张A
+```
+
+- 走桥接的 `/api/explain`：**AI 出牌那一刻就抓取**（`Shadow.explains`），点开是瞬时返回、局面与实际对局 100% 一致（无缓存时才回退内核重放）；
+- AI **过牌**同样给解释（为什么不出）。
+
+**2）复盘页「🤖 AI 解析这手」：任意一手都能分析**
+
+| 这一手是 | 面板给出 |
+|---|---|
+| AI 自己出的 | 当时实际出牌 vs AI 重算选择（一致会标 ✓），外加依据/理由/候选胜率/算牌 |
+| **人类（你）出的** | **反事实对照**：你实际出了什么 → **换 AI 来打会出什么**（不同会标黄），同一套依据/理由/候选 |
+
+- 关键点：分析基于**真实牌谱**（`/api/analyze` 用引擎重放真实局面再问 AI），不做"重放重决策"，因此不会漂移、人类手也能分析——这正是人工点评时最需要的"这手该不该这么出"；
+- 历史人机局只存动作码，进入复盘时由 `/api/decode` 解码成**具体牌面 + 每手归属**（过牌后同一人继续领出，座位由引擎判定），复盘页的手牌快照与"谁出的"因此完全正确；
+- 中盘（双方合计 > 28 张）不启用残局精确求解时，面板会补一句说明，避免只看到"策略网络选择"这一句。
+
+桥接新增接口（`ai_bridge.py`，全部 JSON，失败直接报错不降级）：
+
+```
+POST /ai/api/explain  {sid,ply} | {initial_hands,first_player,opts,moves,ply,ai_seat}
+      -> {ply,seat,text,path,reason,cands,belief,state_text,decided,recorded,anchored_back,cached,note}
+POST /ai/api/analyze  {sid,ply} | {initial_hands,first_player,opts,moves,ply,mode}
+      -> {ply,seat,state_text,recorded{cards,patText,pass},decided{...},agree,explain{path,reason,cands,belief},note}
+POST /ai/api/decode   {initial_hands,first_player,opts,moves|codes}
+      -> {moves:[{ply,seat,cards,pass,pass_on,combo,handAfter,patText}]}
+```
+
+`path` 取值中文对照（前端 `EXPLAIN_PATH_CN`）：`opening_search` 开局搜索 / `pimc_c`、`pimc_cn` 残局求解 / `endgame_order` 残局连续保权 / `report_dump` 报单保权 / `one_shot` 一手打完 / `lookahead` 前瞻搜索 / `fallback_net` 策略网络 / `forced` 唯一合法手。
+
 ## 对局记录 / 复盘（供 AI 读取）
 
 所有对局以**完整、自包含**的 JSON 落盘（无需解码即可读牌面），并附复盘工具 `replay_report.py`：

@@ -1048,6 +1048,7 @@ function startRound() {
   S.last = null; S.shown = [null, null];
   S.bombs = []; S.playsMade = [0, 0];
   S.selected = new Set(); S.hints = []; S.hintIdx = -1;
+  clearOppExplain();
   S.phase = 'playing';
   // 红桃十持有者
   S.red10Holder = null;
@@ -1127,6 +1128,8 @@ function applyPlay(seat, cards) {
   }
   S.selected = new Set(); S.hints = []; S.hintIdx = -1;
   S.roundMoves.push({ seat, cards: cards.map(c => c.i), combo: { ...combo }, ts: Date.now() });
+  if (seat === 1 && S.revealOpp && S.mode === 'ai') showOppExplain(S.roundMoves.length);   // 明牌：解释 AI 这手
+  if (seat === 0) clearOppExplain();
   if (S.mode === 'ai') bridgeMirror(seat, cards);             // 镜像出牌（历史必记）
   if (hand.length === 1) toast('⚠ ' + S.names[seat] + ' 报单！只剩1张', 1800);
   if (msg) toast(msg, 1600);
@@ -1136,13 +1139,16 @@ function applyPlay(seat, cards) {
 }
 function applyPass(seat) {
   if (S.phase !== 'playing' || S.turn !== seat) return;
+  const passed = S.last;                                  // 被过的牌型（S.last 下面会清空）
   S.shown[seat] = { pass: true };
   S.last = null;                                          // 对方获得自由出牌权
   S.selected = new Set(); S.hints = []; S.hintIdx = -1;
   S.roundMoves.push({ seat, cards: [], combo: null, pass: true,
-    pass_on: S.last ? comboToTrick(S.last.combo) : null, ts: Date.now() });
+    pass_on: passed ? comboToTrick(passed.combo) : null, ts: Date.now() });
   if (S.mode === 'ai') bridgeMirror(seat, []);                // 镜像过牌
   S.turn = 1 - seat;
+  if (seat === 1 && S.revealOpp && S.mode === 'ai') showOppExplain(S.roundMoves.length);  // 明牌：AI 为何不出
+  if (seat === 0) clearOppExplain();
   beginTurn();
 }
 
@@ -1163,6 +1169,117 @@ function downloadJSON(filename, value) {
   const url = URL.createObjectURL(blob), a = document.createElement('a');
   a.href = url; a.download = filename; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
+/* ================= 出牌解释（AI 为什么这么出） ================= */
+const EXPLAIN_PATH_CN = {
+  opening_search: '开局搜索', pimc_c: '残局求解(定胜负)', pimc_cn: '残局求解(算分)',
+  endgame_order: '残局连续保权', report_dump: '报单保权', one_shot: '一手打完',
+  lookahead: '前瞻搜索', fallback_net: '策略网络', forced: '唯一合法手',
+};
+const EXPLAIN_CACHE = new Map();          // key -> explain 结果（同一手只算一次）
+
+async function bridgeExplain(payload) {
+  const key = JSON.stringify(['ex', payload.sid || '', payload.ply || 0, payload.moves ? payload.moves.length : 0,
+                              payload.initial_hands ? payload.initial_hands[0].length : 0]);
+  if (EXPLAIN_CACHE.has(key)) return EXPLAIN_CACHE.get(key);
+  const r = await bridgeApi('/api/explain', payload, 40000);
+  if (!r || r.error || !r.text) throw new Error((r && r.error) || '解释不可用');
+  EXPLAIN_CACHE.set(key, r);
+  return r;
+}
+
+/* 复盘分析：按真实局面问「AI 会怎么打这一手 + 为什么」（AI 手、人类手都适用） */
+async function bridgeAnalyze(payload) {
+  const key = JSON.stringify(['an', payload.sid || '', payload.ply || 0,
+                              payload.moves ? payload.moves.length : 0,
+                              payload.initial_hands ? payload.initial_hands[0].length : 0]);
+  if (EXPLAIN_CACHE.has(key)) return EXPLAIN_CACHE.get(key);
+  const r = await bridgeApi('/api/analyze', payload, 60000);
+  if (!r || r.error || !r.recorded) throw new Error((r && r.error) || '分析不可用');
+  EXPLAIN_CACHE.set(key, r);
+  return r;
+}
+
+/* 历史人机局只存了动作码：解码成「谁出的 + 具体哪些牌」才能正确复盘 */
+async function bridgeDecode(payload) {
+  const r = await bridgeApi('/api/decode', payload, 30000);
+  if (!r || r.error || !r.moves) throw new Error((r && r.error) || '解码不可用');
+  return r.moves;
+}
+
+/* 把解释渲染成紧凑中文（明牌条 & 复盘面板共用） */
+function explainHTML(d, opts) {
+  const o = opts || {};
+  const bits = [];
+  if (d.state_text) bits.push(`<div class="row dim">局面：${esc(d.state_text)}</div>`);
+  const chosen = d.text || '';
+  let line = `<span class="k">AI 出牌</span><span class="pt">${esc(chosen)}</span>`;
+  if (d.decided && d.recorded && d.decided !== d.recorded)
+    line += ` <span class="warn">（当时记录：${esc(d.recorded)} → AI 现在会改打：${esc(d.decided)}）</span>`;
+  bits.push(`<div class="row">${line}</div>`);
+  if (d.path) bits.push(`<div class="row"><span class="k">依据</span>${esc(EXPLAIN_PATH_CN[d.path] || d.path)}</div>`);
+  if (d.reason) bits.push(`<div class="row"><span class="k">理由</span>${esc(d.reason)}</div>`);
+  if (d.note) bits.push(`<div class="row dim">${esc(d.note)}</div>`);
+  const cands = (d.cands || []).slice(0, 3).filter(c => c && c.text);
+  if (cands.length && !o.hideCands) {
+    const txt = cands.map(c => `${esc(c.text)}${c.win_prob != null ? ' ' + Math.round(c.win_prob * 100) + '%' : ''}`).join('、');
+    bits.push(`<div class="row dim">候选：${txt}</div>`);
+  }
+  const facts = d.belief && d.belief.facts;
+  if (facts && facts.length) bits.push(`<div class="row dim">算牌：${esc(facts.join('、'))}</div>`);
+  if (d.anchored_back) bits.push(`<div class="row dim">（该手不是 AI 决策点，展示 AI 最近一次决策依据）</div>`);
+  return bits.join('');
+}
+function esc(x) { return String(x == null ? '' : x).replace(/[<>]/g, ''); }
+
+/* 复盘分析渲染：这一手实际出了什么 vs AI 会怎么打（人类手=反事实对照） */
+function analyzeHTML(r, o) {
+  o = o || {};
+  const rec = r.recorded || {}, dec = r.decided || {}, ex = r.explain || {};
+  const bits = [];
+  const who = o.who || (r.seat === 1 ? 'AI' : '你');
+  if (r.state_text) bits.push(`<div class="row dim">局面：${esc(r.state_text)}</div>`);
+  const one = m => (m.pass || !(m.cards || []).length)
+    ? '<span class="warn">不出</span>'
+    : `${esc(m.patText || '')} <span class="dim">${esc(rvCardText(m.cards))}</span>`;
+  bits.push(`<div class="row"><span class="k">${esc(o.recLabel || who + '实际出')}</span>`
+    + `<span class="pt">${one(rec)}</span></div>`);
+  const same = (dec.cards || []).join(',') === (rec.cards || []).join(',');
+  bits.push(`<div class="row"><span class="k">AI 会打</span><span class="pt">${one(dec)}</span>`
+    + (same ? ' <span class="rv-same">与这手一致 ✓</span>' : ' <span class="rv-diff">与这手不同</span>')
+    + '</div>');
+  if (ex.path) bits.push(`<div class="row"><span class="k">依据</span>${esc(EXPLAIN_PATH_CN[ex.path] || ex.path)}</div>`);
+  if (ex.reason) bits.push(`<div class="row"><span class="k">理由</span>${esc(ex.reason)}</div>`);
+  if (r.note) bits.push(`<div class="row dim">${esc(r.note)}</div>`);
+  const cands = (ex.cands || []).slice(0, 3).filter(c => c && c.text);
+  if (cands.length) {
+    const txt = cands.map(c => `${esc(c.text)}${c.win_prob != null ? ' ' + Math.round(c.win_prob * 100) + '%' : ''}`).join('、');
+    bits.push(`<div class="row dim">候选：${txt}</div>`);
+  }
+  const facts = ex.belief && ex.belief.facts;
+  if (facts && facts.length) bits.push(`<div class="row dim">算牌：${esc(facts.join('、'))}</div>`);
+  return bits.join('');
+}
+
+/* 明牌模式下：AI 出牌后自动给出理由 */
+async function showOppExplain(ply) {
+  const box = $('opp-explain');
+  if (!box) return;
+  if (!(S.mode === 'ai' && S.revealOpp && bridge.ready && bridge.sid)) { box.classList.add('hidden'); return; }
+  box.classList.remove('hidden');
+  box.innerHTML = '<span class="explain-loading">🤖 解析 AI 这手…</span>';
+  try {
+    const d = await bridgeExplain({ sid: bridge.sid, ply });
+    if (!S.revealOpp) { box.classList.add('hidden'); return; }
+    box.innerHTML = '🤖 ' + explainHTML(d, { hideCands: false });
+  } catch (e) {
+    box.innerHTML = '<span class="dim">🤖 解析暂不可用</span>';
+  }
+}
+function clearOppExplain() {
+  const box = $('opp-explain');
+  if (box) { box.classList.add('hidden'); box.innerHTML = ''; }
+}
+
 /* ---- 对局记录：服务器列表（唯一编号 + 时间 + 点评数），点击进入复盘 ---- */
 const RV = { game: null, step: 0, total: 0, comments: [], snapshots: [], no: '', names: [] };
 const PTT = { 0: '单张', 1: '对子', 2: '连对', 3: '三张', 4: '三带二', 5: '三带一', 6: '飞机', 7: '顺子', 8: '炸弹', 9: '四带三' };
@@ -1224,7 +1341,17 @@ async function openReview(no) {
   RV.names = names;
   const init0 = ((isOnline ? g.initialHands : g.hands) || [])[0] || [];
   const init1 = ((isOnline ? g.initialHands : g.hands) || [])[1] || [];
-  const seq = (g.moves && g.moves.length) ? g.moves : (g.legacyMoves || []);
+  let seq = (g.moves && g.moves.length) ? g.moves : (g.legacyMoves || []);
+
+  // 历史人机局只存了动作码：解码成「谁出的 + 具体哪些牌」，手牌快照与归属才正确
+  if (!isOnline && !(g.moves && g.moves.length) && (g.codes || []).length && bridge.ready) {
+    $('rv-move').textContent = '正在解码牌谱…';
+    try {
+      seq = await bridgeDecode({ initial_hands: [init0, init1], first_player: g.leader,
+                                opts: g.opts || {}, moves: g.codes });
+      g.moves = seq;
+    } catch (e) { /* 解码失败：退回旧的“点数文本”显示 */ }
+  }
   RV.total = seq.length;
 
   // 逐步手牌快照（初始 + 每手之后）
@@ -1245,6 +1372,8 @@ async function openReview(no) {
   $('rv-h0-title').textContent = names[0] + '（座位0）';
   $('rv-h1-title').textContent = names[1] + '（座位1）';
 
+  $('rv-explain-box').classList.add('hidden');
+  $('rv-explain-box').innerHTML = '';
   const sel = $('rv-comment-ply');
   sel.innerHTML = '<option value="">整局点评</option>' + seq.map((m, i) =>
     `<option value="${i + 1}">第${i + 1}手（${names[m.seat] || '座位' + m.seat}）</option>`).join('');
@@ -1345,8 +1474,55 @@ async function reviewPreviousGame() {
   if (sel && RV.total > 0) sel.value = String(RV.total);
 }
 
+/* 复盘：解析当前这一手 —— AI 手看它当时的依据，人类手看「换 AI 来打会怎么出」 */
+async function explainCurrentPly() {
+  const box = $('rv-explain-box');
+  if (!RV.game) return;
+  const g = RV.game;
+  const ply = RV.step;                      // 0=开局，不解析
+  if (!ply) {
+    box.classList.remove('hidden');
+    box.innerHTML = '<div class="row dim">请先翻到具体某一手（第 1 手起）再解析。</div>';
+    return;
+  }
+  box.classList.remove('hidden');
+  box.innerHTML = '<span class="explain-loading">🤖 AI 正在分析这一手…（含搜索，可能数秒）</span>';
+  try {
+    const isOnline = g.source === 'online_room';
+    // 正在进行的本局：直接问会话（局面 100% 对得上，最快）
+    const useSession = !isOnline && bridge.ready && bridge.sid && g.live &&
+                       S.mode === 'ai' && S.currentNo === g.no;
+    const mvSeat = (g.moves && g.moves[ply - 1]) ? g.moves[ply - 1].seat : (ply - 1) % 2;
+    let r;
+    if (useSession) {
+      r = await bridgeAnalyze({ sid: bridge.sid, ply });
+    } else {
+      const initial = (isOnline ? g.initialHands : g.hands) || [[], []];
+      const moves = (g.moves || []).map(m => m.pass ? [] : (m.cards || []));
+      r = await bridgeAnalyze({
+        initial_hands: initial, first_player: isOnline ? g.firstPlayer : g.leader,
+        opts: g.opts || {}, moves, ply, mode: g.mode || 'hybrid',
+      });
+    }
+    const seat = (r.seat != null) ? r.seat : mvSeat;
+    const aiSeat = (r.ai_seat != null) ? r.ai_seat : 1;
+    // 人机局：区分“AI 自己的手”与“人类的手（反事实对照）”；真人局：AI 视角
+    let title, who;
+    if (isOnline) { title = 'AI 视角 · 这一手它会怎么打'; who = '座位' + seat; }
+    else if (seat === aiSeat) { title = 'AI 出牌依据（第 ' + ply + ' 手 · AI）'; who = 'AI '; }
+    else { title = '换 AI 来打这一手（第 ' + ply + ' 手 · 你）'; who = '你 '; }
+    box.innerHTML = '🤖 <b>' + esc(title) + '</b><div style="margin-top:4px">'
+      + analyzeHTML(r, { who: (who || ((seat === 1) ? 'AI' : '你')).trim(), recLabel: ((isOnline ? ('座位' + seat) : who) + '实际出').trim() })
+      + '</div>';
+  } catch (e) {
+    box.innerHTML = '<span class="dim">🤖 解析不可用：' + esc((e && e.message) || e) + '</span>';
+  }
+}
+
 function reviewStep(d) {
   RV.step = Math.max(0, Math.min(RV.total, RV.step + d));
+  $('rv-explain-box').classList.add('hidden');
+  $('rv-explain-box').innerHTML = '';
   renderReview();
 }
 
@@ -1722,6 +1898,7 @@ function initLobby() {
   $('rv-next').addEventListener('click', () => reviewStep(1));
   $('rv-last').addEventListener('click', () => { RV.step = RV.total; renderReview(); });
   $('rv-comment-save').addEventListener('click', saveReviewComment);
+  $('rv-explain').addEventListener('click', explainCurrentPly);
   $('rv-refresh').addEventListener('click', async () => {
     await openReview(RV.no);
     if (RV.total > 0) { RV.step = RV.total; renderReview(); }
@@ -1878,7 +2055,14 @@ function init() {
   $('btn-rules-close').addEventListener('click', () => $('rules-modal').classList.add('hidden'));
   $('btn-score').addEventListener('click', showScoreboard);
   $('btn-score-close').addEventListener('click', () => $('score-modal').classList.add('hidden'));
-  $('btn-reveal').addEventListener('click', () => { S.revealOpp = !S.revealOpp; render(); });
+  $('btn-reveal').addEventListener('click', () => {
+    S.revealOpp = !S.revealOpp;
+    render();
+    if (S.revealOpp && S.mode === 'ai' && S.roundMoves.length) {
+      const last = S.roundMoves[S.roundMoves.length - 1];
+      if (last.seat === 1) showOppExplain(S.roundMoves.length); else clearOppExplain();
+    } else clearOppExplain();
+  });
   window.addEventListener('resize', relayoutHand);
   window.addEventListener('orientationchange', relayoutHand);
 }

@@ -348,3 +348,26 @@ button { font-family: inherit; }
 }
 
 .rev-pos { white-space: nowrap; }
+
+/* ---------- 出牌解释 ---------- */
+.play-explain { max-width: 92vw; font-size: 12.5px; line-height: 1.7; color: #cfe6ff;
+  background: rgba(6, 40, 66, .82); border: 1px solid rgba(120, 200, 255, .45);
+  border-radius: 10px; padding: 6px 12px; margin-top: 2px; text-align: left; }
+.play-explain b { color: #8fd0ff; }
+.play-explain .pt { color: #ffd88e; font-weight: 700; }
+.btn.explain-btn { background: rgba(6, 40, 66, .7); border-color: rgba(120, 200, 255, .5); color: #bfe3ff; }
+.rv-explain { background: rgba(6, 40, 66, .55); border: 1px solid rgba(120, 200, 255, .35);
+  border-radius: 10px; padding: 9px 12px; font-size: 12.5px; line-height: 1.8; color: #dbeaff; margin-bottom: 10px; }
+.rv-explain .row { margin-bottom: 4px; }
+.rv-explain .k { color: #8fd0ff; font-weight: 700; margin-right: 4px; }
+.rv-explain .pt { color: #ffd88e; font-weight: 700; }
+.rv-explain .dim { opacity: .72; }
+.rv-explain .cand { color: #cfe6ff; }
+.rv-explain .warn { color: #ffb35c; }
+.rv-explain .rv-same { color: #7ee0a8; }
+.rv-explain .rv-diff { color: #ffb35c; }
+.explain-loading { color: #9fc7e8; font-size: 12px; }
+@media (max-width: 760px) {
+  .play-explain { font-size: 12px; padding: 5px 10px; }
+  .rv-explain { font-size: 12px; }
+}

@@ -1,0 +1,15 @@
+# 运行期数据（对局/点评/会话）与大文件不进仓库
+data/
+__pycache__/
+*.pyc
+# 日志
+*.log
+server_ai_log.txt
+# 临时/本地凭据
+tmp_toks.json
+sid.txt
+smoke*.py
+t.py
+t2.py
+_upload/
+_bak/

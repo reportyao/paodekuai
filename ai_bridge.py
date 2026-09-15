@@ -19,6 +19,10 @@
   POST /action  {sid, seat, cards}  -> 镜像人类动作（cards=[] 过牌）-> {ok, finished}
   POST /act     {sid}               -> AI(座位1)出一手并同步 -> {cards:[id...], finished}
   POST /suggest {sid}               -> 座位0的建议（重放决策，不落子）-> {cards:[id...]}
+  POST /api/explain {sid,ply} | {initial_hands,moves,...}  -> 出牌解释（AI 为什么这么出；明牌模式）
+  POST /api/analyze {sid,ply} | {initial_hands,moves,...}  -> 复盘分析：该手按真实局面 AI 会怎么打 + 理由
+  POST /api/decode  {initial_hands,first_player,opts,moves} -> 牌谱解码（座位/具体牌/牌型，复盘渲染用）
+  POST /api/decide  {my_hand,opp_n,trick,history,explain} -> 无状态单步决策（可带解释）
   不降级策略：任何失败都返回明确错误（4xx/5xx + error 文案），
   网页版会暂停并提示重试，绝不静默换成内置贪心 AI。
 
@@ -41,6 +45,12 @@ from urllib.parse import urlparse
 DEFAULT_BOT_ROOT = Path(__file__).resolve().parent.parent / "pdk-ai-prod"     # 生产版仓库 (github.com/reportyao/pdk-ai)
 if not DEFAULT_BOT_ROOT.exists():
     DEFAULT_BOT_ROOT = Path(__file__).resolve().parent.parent / "pdk_ai_work" / "pdk_ai"  # 同源工作副本
+# --bot-root 需在导入 pdk/server 之前生效，这里先解析一次（argparse 在后面还会再解析）
+for _i, _a in enumerate(sys.argv):
+    if _a == "--bot-root" and _i + 1 < len(sys.argv):
+        DEFAULT_BOT_ROOT = Path(sys.argv[_i + 1])
+    elif _a.startswith("--bot-root="):
+        DEFAULT_BOT_ROOT = Path(_a.split("=", 1)[1])
 BOT_ROOT = DEFAULT_BOT_ROOT
 if not BOT_ROOT.exists():
     BOT_ROOT = Path(__file__).resolve().parent      # 允许把桥放到 pdk_ai 目录内运行
@@ -59,6 +69,7 @@ _spec.loader.exec_module(bot_server)
 from pdk import fast                 # noqa: E402
 from pdk.core import Config          # noqa: E402
 from pdk.engine import Game, counts_of_ids  # noqa: E402
+from pdk.explain import describe_state, pattern_text  # noqa: E402
 from pdk.fast import PASS_CODE       # noqa: E402
 
 # 生产双模式 (pdk-ai README「当前生产模型与部署清单」):
@@ -283,9 +294,32 @@ class Shadow:
         self.codes = []
         self.moves_detail = []
         self.init_payload = {"hands": [h0, h1], "kitty": k, "leader": leader, "opts": opts}
+        self.explains = {}                   # ply -> 本手 AI 决策解释（明牌/复盘即时可读，免重算）
         self.bad = False                     # 影子失效 -> 通知网页版降级
         self.restoring = False               # 恢复重放期间跳过逐步写盘（提速）
         self.lock = threading.Lock()
+
+    def capture_explain(self, code: int, cards: list):
+        """落子前抓取 agent.last_explain —— 明牌模式与复盘可即时取用（不重算、不漂移）。
+        仅当解释确实是本手时缓存（内核拒绝/改打时不缓存，宁缺勿错）。"""
+        try:
+            ex = getattr(self.agent, "last_explain", None) or {}
+            if int(ex.get("move", -1)) != int(code):
+                return
+            seat = self.ai_seat
+            self.explains[len(self.codes) + 1] = {
+                "explain": json.loads(json.dumps(ex)),      # 深拷贝（纯 JSON 结构）
+                "state": {"me": [int(x) for x in self.cg.g.cnt[seat]],
+                          "opp": int(self.cg.g.n[1 - seat]),
+                          "trick": (None if self.cg.g.trick[0] == 255
+                                    else [int(x) for x in self.cg.g.trick])},
+                "decided": int(code), "recorded": int(code), "cards": list(cards),
+            }
+            if len(self.explains) > 200:                    # 上限保护（一局最多几十手）
+                for k in sorted(self.explains)[:-200]:
+                    self.explains.pop(k, None)
+        except Exception:
+            pass
 
     # 与 pdk_ai server._apply 相同的镜像顺序：先 observe 后落子
     def snapshot_stats(self):
@@ -327,6 +361,9 @@ class Shadow:
             write_replay(self, live=True)                 # 实时落盘（复盘当局/上一局都能看到最新进度）
 
     def legal_ids(self, seat: int):
+        """当前出牌方的合法动作（牌 id 列表）。非出牌方返回空，避免用错手牌映射。"""
+        if int(self.cg.g.turn) != int(seat):
+            return []
         return [list(fast.code_to_cards(c, self.game.hand_ids(seat)))
                 for c in self.cg.legal()]
 
@@ -434,6 +471,7 @@ def do_act(sid: str):
             # 注意顺序：先由当前手牌把 code 映射成具体牌 id，再落子镜像
             # （落子后手牌已移除，code_to_cards 会取不到牌）
             cards = list(fast.code_to_cards(code, s.game.hand_ids(s.ai_seat)))
+            s.capture_explain(code, cards)        # 落子前抓取（当手局面 + 解释）
             s._apply(code)
             save_replay(sid, s)
         except Exception as e:
@@ -468,6 +506,267 @@ def do_suggest(sid: str):
         rep.snapshot_stats()
         cards = list(fast.code_to_cards(code, rep.game.hand_ids(0)))
     return {"cards": cards}, 200
+
+
+def do_explain(p: dict):
+    """出牌解释（明牌模式：AI 这手为什么这么出）。
+
+    两种入参：
+      1) {"sid": ..., "ply": 7}                      —— 会话版：优先取本局实时抓取的决策解释（瞬时、精确）；
+                                                        无缓存时回退到内核重放解释
+      2) {"initial_hands": [[id...],[id...]], "first_player": 0, "ai_seat": 1,
+          "opts": {...}, "moves": [code|牌id数组...], "ply": 7}  —— 直传版（在线真人局/历史复盘）
+    ply 不传=最后一手。
+    """
+    try:
+        if p.get("sid"):
+            s = get_sess(p["sid"])
+            with s.lock:
+                if s.bad:
+                    return {"error": "影子牌局已失效"}, 500
+                ply = int(p.get("ply") or len(s.codes) or 0)
+                # 实时抓取的决策解释（AI 出牌那一刻记录的，状态 100% 对得上）
+                hit = s.explains.get(ply)
+                if hit:
+                    ex = dict(hit["explain"])
+                    ex["state_text"] = describe_state(hit["state"]["me"], hit["state"]["opp"],
+                                                      hit["state"]["trick"])
+                    ex["decided"] = pattern_text(hit["decided"], s.cfg)
+                    ex["recorded"] = pattern_text(hit["recorded"], s.cfg)
+                    ex["ply"] = ply
+                    ex["mode"] = s.prod_mode
+                    ex["cached"] = True
+                    ex["note"] = explain_note(ex, sum(hit["state"]["me"]), hit["state"]["opp"])
+                    return ex, 200
+                # 无缓存（老会话/恢复的局）：回退内核重放；人类手锚定到最近一次 AI 决策
+                ai_ply = _nearest_ai_ply(s, ply)
+                if ai_ply is None:
+                    return {"error": f"第 {ply} 手之前 AI 没有决策点"}, 400
+                init = s.init_payload
+                payload = {
+                    "initial_hands": init["hands"], "first_player": init["leader"],
+                    "ai_seat": s.ai_seat, "opts": init["opts"],
+                    "moves": list(s.codes), "ply": ai_ply,
+                }
+                with (_ACT_SEM or _NULL_SEM):
+                    out = bot_server._explain_replay(payload)
+                out["reqPly"] = ply
+                out["anchored_back"] = bool(ai_ply != ply)
+                st = states_at(out.get("ply"), s)
+                out["note"] = explain_note(out, st[0], st[1])
+                return out, 200
+        else:
+            payload = {k: v for k, v in p.items() if k != "mode"}
+        with (_ACT_SEM or _NULL_SEM):
+            out = bot_server._explain_replay(payload)
+        return out, 200
+    except Exception as e:
+        return {"error": f"解释生成失败：{e}"}, 500
+
+
+def _nearest_ai_ply(s: Shadow, ply: int):
+    """该手之前最近的一次 AI 决策手（含本身）。用于人类手点评时锚定解释对象。"""
+    for i in range(min(ply, len(s.moves_detail)), 0, -1):
+        if s.moves_detail[i - 1].get("seat") == s.ai_seat:
+            return i
+    return None
+
+
+_PIMC_THRESHOLD = 28            # 与生产配置一致：双方合计 <= 28 张才启用残局精确求解
+
+
+def explain_note(ex: dict, my_n: int, opp_n: int) -> str:
+    """网络直接决策时的补充说明（解释面板不至于只剩一句“策略网络选择”）。"""
+    path = str((ex or {}).get("path") or "")
+    if (ex or {}).get("cands"):
+        return ""
+    if path in ("fallback_net", "lookahead"):
+        return (f"此处双方合计 {my_n + opp_n} 张，超过 {_PIMC_THRESHOLD} 张阈值：未启用残局精确求解，"
+                f"由策略网络(56 维动作后特征)直接估价；到残局(不超过 {_PIMC_THRESHOLD} 张)才有胜率与候选对比。")
+    if path == "forced":
+        return "该手只有唯一合法出法，无需搜索。"
+    return ""
+
+
+# ---------------- 真实牌谱重建（复盘/解释共用） ----------------
+
+def _take_cards(code: int, pool: list):
+    """从手牌池里取出该 code 对应的具体牌 id（并移除）。"""
+    cards = list(fast.code_to_cards(code, sorted(pool)))
+    for c in cards:
+        pool.remove(c)
+    return cards
+
+
+def _replay_positions(hands, leader, opts, moves):
+    """按真实牌谱重放（不重决策、不漂移），返回逐手明细 + 每手落子前的真实局面。
+
+    moves 元素可以是 code(int)、牌 id 数组、或 {"cards":[...], "seat":n, "pass":bool}。
+    座位一律由内核判定（过牌后同一人继续领出，不能按 i%2 猜）。
+    返回 (detail, states)：
+      detail[i] = {ply, seat, cards, code, pass, pass_on, combo}
+      states[i] = {seat, n, trick, hand_ids}     # 第 i+1 手落子前
+    """
+    cfg = build_cfg(opts or {})
+    h0 = sorted(int(x) for x in hands[0])
+    h1 = sorted(int(x) for x in hands[1])
+    pools = [list(h0), list(h1)]
+    cg = fast.CGame(counts_of_ids(h0), counts_of_ids(h1), int(leader), cfg)
+    detail, states = [], []
+    for i, mv in enumerate(moves):
+        seat = int(cg.g.turn)
+        trick = None if cg.g.trick[0] == 255 else [int(x) for x in cg.g.trick]
+        # 落子「前」的真实局面快照（用于复盘分析：这一手当时是什么情况）
+        states.append({"seat": seat, "n": [int(cg.g.n[0]), int(cg.g.n[1])],
+                       "trick": trick, "hand_ids": list(pools[seat]), "code": None})
+        for s2 in (0, 1):                     # 落子前：手牌池必须与内核剩余张数一致
+            if len(pools[s2]) != int(cg.g.n[s2]):
+                raise ValueError(f"第 {i + 1} 手前手牌不一致（座位{s2} 解码 {len(pools[s2])} 张，"
+                                 f"内核 {int(cg.g.n[s2])} 张）")
+        given_seat = mv.get("seat") if isinstance(mv, dict) else None
+        if given_seat is not None and int(given_seat) != seat:
+            raise ValueError(f"第 {i + 1} 手座位与牌谱不符（牌谱 {given_seat}, 内核 {seat}）")
+        if isinstance(mv, dict):
+            if mv.get("cards"):
+                cards = [int(c) for c in mv["cards"]]
+                code = fast.cards_to_code(cards)
+                for c in cards:
+                    pools[seat].remove(c)
+            elif mv.get("code"):
+                code = int(mv["code"])
+                cards = _take_cards(code, pools[seat])
+            else:
+                code, cards = PASS_CODE, []
+        elif isinstance(mv, int):
+            code = int(mv)
+            cards = _take_cards(code, pools[seat]) if code else []
+        else:
+            cards = [int(c) for c in (mv or [])]
+            code = fast.cards_to_code(cards) if cards else PASS_CODE
+            for c in cards:
+                pools[seat].remove(c)
+        if code and code not in set(cg.legal()):
+            raise ValueError(f"第 {i + 1} 手在真实牌谱上不合法（座位 {seat}）")
+        states[-1]["code"] = code
+        pat = None
+        if code:
+            pat = (fast.classify_code(code, False, cfg)
+                   or fast.classify_code(code, True, cfg))
+        detail.append({
+            "ply": i + 1, "seat": seat, "cards": cards, "code": code,
+            "pass": code == PASS_CODE,
+            "pass_on": trick,
+            "combo": ({"ptype": int(pat.ptype), "main": int(pat.main),
+                       "len": int(pat.length), "nc": int(pat.nc)} if pat else None),
+            "handAfter": int(cg.g.n[seat]) - len(cards),
+        })
+        cg.step(code)
+        if cg.finished:
+            break
+    return detail, states, cfg
+
+
+def states_at(ply, s) -> tuple:
+    """（双方面向 AI 座位的剩余张数）——用于给重放版解释补 note。"""
+    try:
+        i = int(ply) - 1
+        d = s.moves_detail[i]
+        seat = d["seat"]
+        # 该手前的手牌数：当前剩余 + 该手及以后该座位出的牌
+        left = int(s.game.hand_count(seat)) + sum(len(x.get("cards") or []) for x in s.moves_detail[i:]
+                                                 if x["seat"] == seat)
+        opp = int(s.game.hand_count(1 - seat)) + sum(len(x.get("cards") or []) for x in s.moves_detail[i:]
+                                                     if x["seat"] != seat)
+        if seat == s.ai_seat:
+            return left, opp
+        return opp, left
+    except Exception:
+        return 0, 0
+
+
+def _resolve_replay(p: dict):
+    """会话版(sid) 或 直传版 -> (detail, states, cfg, ai_seat, mode)。"""
+    sid = p.get("sid")
+    if sid:
+        s = get_sess(sid)
+        with s.lock:
+            init = s.init_payload
+            moves = list(s.codes)
+            detail, states, cfg = _replay_positions(init["hands"], init["leader"],
+                                                    init["opts"], moves)
+            return detail, states, cfg, s.ai_seat, s.prod_mode
+    hands = p.get("initial_hands") or p.get("hands")
+    if not hands or len(hands) != 2:
+        raise ValueError("initial_hands 必填（两家初始手牌）")
+    moves = p.get("moves") or p.get("codes") or []
+    detail, states, cfg = _replay_positions(hands, int(p.get("first_player", 0)),
+                                            p.get("opts") or {}, moves)
+    return (detail, states, cfg, int(p.get("ai_seat", 1)),
+            str(p.get("mode", "hybrid")).lower())
+
+
+def do_decode(p: dict):
+    """把牌谱解码成逐手明细（座位由内核判定；顺带给出真实牌面与牌型）。
+
+    历史人机局的复盘文件只存动作码，前端拿不到“谁出的/具体哪些牌”→ 复盘手牌快照会错。
+    入参：{initial_hands|hands, first_player, opts, moves|codes}
+    """
+    try:
+        detail, states, cfg = _replay_positions(
+            p.get("initial_hands") or p.get("hands"), int(p.get("first_player", 0)),
+            p.get("opts") or {}, p.get("moves") or p.get("codes") or [])
+        return {"moves": [{
+            "ply": d["ply"], "seat": d["seat"], "cards": d["cards"], "pass": d["pass"],
+            "pass_on": d["pass_on"], "combo": d["combo"], "handAfter": d["handAfter"],
+            "patText": pattern_text(d["code"], cfg) if d["code"] else "不出",
+        } for d in detail]}, 200
+    except Exception as e:
+        return {"error": f"牌谱解码失败：{e}"}, 500
+
+
+def do_analyze(p: dict):
+    """复盘分析：给某一手，返回「按真实局面，AI 会怎么打 + 为什么」。
+
+    与 /api/explain 的区别：局面取自真实牌谱（不重放重决策，不漂移），
+    所以 AI 手与人类手都能分析 —— 人类手就是反事实：“这手换 AI 来打会怎样”。
+    入参：{sid, ply} 或 {initial_hands, first_player, opts, moves, ply, mode}
+    """
+    try:
+        detail, states, cfg, ai_seat, mode = _resolve_replay(p)
+        if not detail:
+            return {"error": "本局还没有可分析的出牌"}, 400
+        ply = int(p.get("ply") or len(detail))
+        if not (1 <= ply <= len(detail)):
+            return {"error": f"ply 超出范围（1..{len(detail)}）"}, 400
+        d, st = detail[ply - 1], states[ply - 1]
+        seat = int(d["seat"])
+        trick = st["trick"]
+        my_hand = list(st["hand_ids"])
+        opp_n = int(st["n"][1 - seat])
+        history = [{"seat": 0 if x["seat"] == seat else 1, "move": list(x["cards"]),
+                    "pass_on": x["pass_on"]} for x in detail[:ply - 1]]
+        payload = {"my_hand": my_hand, "opp_n": opp_n, "trick": trick,
+                   "history": history, "explain": True, "mode": mode}
+        res, code = do_decide(payload)
+        if code != 200:
+            return res, code
+        ex = res.get("explain") or {}
+        decided = [int(c) for c in (res.get("move") or [])]
+        rec = [int(c) for c in d["cards"]]
+        return {
+            "ply": ply, "seat": seat, "ai_seat": ai_seat, "mode": res.get("mode"),
+            "engine": res.get("engine"), "my_n": len(my_hand), "opp_n": opp_n,
+            "state_text": describe_state(counts_of_ids(my_hand), opp_n, trick),
+            "recorded": {"cards": rec, "patText": pattern_text(d["code"], cfg) if d["code"] else "不出",
+                         "pass": bool(d["pass"])},
+            "decided": {"cards": decided, "patText": ex.get("text") or ("不出" if not decided else ""),
+                        "pass": bool(res.get("pass")) or not decided},
+            "agree": decided == rec,
+            "explain": ex,
+            "note": explain_note(ex, len(my_hand), opp_n),
+        }, 200
+    except Exception as e:
+        return {"error": f"复盘分析失败：{e}"}, 500
 
 
 def do_decide(p: dict):
@@ -547,7 +846,10 @@ def _decide_with_engine(payload: dict, engine: str) -> dict:
     legal = cg.legal()
     mv_code = ag.act(cg)
     cards = list(fast.code_to_cards(mv_code, sorted(my_ids))) if mv_code else []
-    return {"move": cards, "pass": mv_code == 0, "legal_count": len(legal)}
+    out = {"move": cards, "pass": mv_code == 0, "legal_count": len(legal)}
+    if payload.get("explain"):
+        out["explain"] = getattr(ag, "last_explain", {})     # 与生产 /api/decide 一致的 explanation
+    return out
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -610,7 +912,8 @@ class Handler(BaseHTTPRequestHandler):
                 s = get_sess(q["sid"][0])
                 with s.lock:
                     seat = int(q["seat"][0]) if "seat" in q else int(s.game.turn)
-                    self._json({"seat": seat, "legal": s.legal_ids(seat)})
+                    self._json({"seat": seat, "turn": int(s.game.turn),
+                                "legal": s.legal_ids(seat)})
             else:
                 self._json({"error": "unknown endpoint"}, 404)
         except Exception as e:
@@ -636,6 +939,12 @@ class Handler(BaseHTTPRequestHandler):
                 body, code = do_suggest(payload["sid"])
             elif u.path == "/api/decide":
                 body, code = do_decide(payload)
+            elif u.path == "/api/explain":
+                body, code = do_explain(payload)
+            elif u.path == "/api/analyze":
+                body, code = do_analyze(payload)
+            elif u.path == "/api/decode":
+                body, code = do_decode(payload)
             else:
                 body, code = {"error": "unknown endpoint"}, 404
             self._json(body, code)
