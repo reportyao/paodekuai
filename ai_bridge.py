@@ -759,6 +759,9 @@ def do_explain(p: dict):
         return out, 200
     except ApiError:
         raise
+    except ValueError as e:
+        # 上游重放类错误（如"ply 之前 AI 没有决策点""牌谱不合法"）属调用方参数问题
+        return {"error": f"无法解释该手：{e}"}, 400
     except Exception as e:
         return {"error": f"解释生成失败：{e}"}, 500
 
