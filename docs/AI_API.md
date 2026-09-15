@@ -12,13 +12,15 @@
 
 | 项 | 值 |
 |---|---|
-| 公网基址（HTTPS，推荐） | `https://chinesetestsite.com/pdk-ai/v1` |
-| 内网地址（同机调用，免鉴权） | `http://127.0.0.1:8766/api` |
-| 现状说明 | 公网入口需先在服务器上启用"外部 API 实例 + 网关"（见《API 开放方案》）；未启用前仅内网可用 |
+| 公网基址（HTTPS） | `https://chinesetestsite.com/pdk-ai/v1` |
+| 内网地址（同机调用，免鉴权） | `http://127.0.0.1:8766/api`（网页版对局实例） |
+| 服务形态 | 对外走**独立 AI 实例 + 网关**：`paodekuai-api`(127.0.0.1:8776) + `pdkai-gateway`(127.0.0.1:8770)，由 nginx 的 `/pdk-ai/` 路由对外，与网页版对局实例（8766）物理隔离 |
 | 传输 | HTTPS（TLS 1.2/1.3）；请求/响应均为 `application/json; charset=utf-8` |
-| 鉴权 | 请求头 `X-API-Key: <你的Key>`（同时接受 `Authorization: Bearer <Key>`） |
-| 超时 | 网关读超时 60 秒；单次决策通常 0.2–2.5 秒 |
-| 请求体上限 | 256 KB（牌谱 history 通常 < 5 KB） |
+| 鉴权 | 请求头 `X-API-Key: <你的Key>`（同时接受 `Authorization: Bearer <Key>`）；`/v1/health` 免 Key |
+| 超时 | 网关到上游 60 秒；nginx 读超时 65 秒；单次决策通常 0.2–2.5 秒 |
+| 请求体上限 | 256 KB（牌谱 history 通常 < 5 KB）；`history` ≤ 500 条、`my_hand` ≤ 20 张 |
+| CORS | 默认允许任意来源（`Access-Control-Allow-Origin: *`），浏览器可直接调用 |
+| 审计 | 每次调用按 `时间 / Key 名 / 接口 / 状态码 / 耗时` 记入 `/var/log/paodekuai-api.log`（**不记录明文 Key**） |
 
 ### 1.1 鉴权
 
@@ -28,17 +30,20 @@ X-API-Key: pdk_live_xxxxxxxxxxxxxxxx
 
 Key 由服务方签发，绑定：配额（每分钟/每天/并发）+ 可选 IP 白名单。Key 泄露可由服务方即时吊销。
 
-### 1.2 限流与配额（默认档，可按 Key 调整）
+### 1.2 限流与配额（当前生效值，可按 Key 调整）
 
-| 限制项 | 默认值 | 超限响应 |
+| 限制项 | 当前值 | 超限响应 |
 |---|---|---|
-| 单 Key 速率 | 60 次/分钟 | `429` + `Retry-After` |
-| 单 Key 并发 | 1 个进行中请求 | `429` |
-| 单 Key 日配额 | 20000 次/天 | `429` |
-| 单 IP 速率（兜底） | 5 次/秒（burst 10） | `429` |
-| 全局并发（服务端保护） | 1 | `503`（排队超时） |
+| 单 Key 速率 | 120 次/分钟 | `429` + `Retry-After` |
+| 单 Key 并发 | 1 个进行中请求 | `429` + `Retry-After: 2` |
+| 单 Key 日配额 | 50 000 次/天 | `429` + `Retry-After: 3600` |
+| 单 IP 速率（nginx 兜底） | 5 次/秒（burst 10） | `429` |
+| 外部实例全局并发 | 1（整局对局与单步决策共用） | `503` + `Retry-After: 5` |
+| 会话数上限 | 64（对外实例），空闲 2 小时自动回收 | — |
+| 未知 Key / 无 Key | — | `401` |
+| 来源 IP 不在白名单 | 白名单当前为空（不限制），可随时加 | `403` |
 
-> 服务跑在 2 vCPU 的共享服务器上，决策是 CPU 密集型（残局枚举求解）。**请勿并发轰炸**；需要更高吞吐请申请独立实例。
+> 服务跑在 2 vCPU 的共享服务器上，且与你自己的对局实例物理隔离（对方实例 `CPUWeight=100`，你的对局实例 `1000`）：**外部流量再大也不会抢占你自己对局的算力**。整局对局是"服务端持局 + AI 自动应手"，一次 `/v1/play` 可能连续算多手，请按顺序调用（不要并发打同一个 gid）。
 
 ### 1.3 错误响应
 
@@ -51,13 +56,34 @@ Key 由服务方签发，绑定：配额（每分钟/每天/并发）+ 可选 IP
 | HTTP | 含义 | 处理建议 |
 |---|---|---|
 | 200 | 成功 | — |
-| 400 | 参数缺失/格式错误/牌谱不合法 | 修正请求，不要重试 |
+| 400 | 参数缺失/格式错误/牌谱不合法/牌 id 越界 | 修正请求，不要重试 |
 | 401 | 缺少或无效 API Key | 检查请求头 |
 | 403 | 来源 IP 不在白名单 | 联系服务方加白 |
-| 413 | 请求体过大 | 精简 history |
+| 404 | 未知 `/v1` 接口；或 `gid`/`sid` 不存在或已过期（会话空闲 2h 回收） | 重新 `/v1/new_game` |
+| 409 | 现在不是你的回合（整局对局里轮次不在调用方） | 先 `/v1/state` 对账，再决定是否重发 |
+| 413 | 请求体/字段过大 | 精简 history |
 | 429 | 速率/并发/日配额超限 | 按 `Retry-After` 退避重试 |
 | 500 | AI 内核异常（**不降级**：绝不返回"猜测结果"） | 可重试 1–2 次；持续失败请联系服务方 |
-| 503 | 服务繁忙或排队超时 | 指数退避重试（1s/2s/4s） |
+| 502 | 网关到 AI 服务不可达/超时 | 指数退避重试 |
+| 503 | 服务繁忙或排队超时（全局并发已满） | 按 `Retry-After` 重试 |
+
+---
+
+## 1.4 接口总览
+
+| 接口 | 用途 | 形态 |
+|---|---|---|
+| `GET  /v1/health` | 健康与模型版本（`pdkCommit`、`netProbe`、`openingBudget`） | 免 Key |
+| `POST /v1/new_game` | **整局对局**：开新局（服务端发牌，AI 自动应手） | 会话 |
+| `POST /v1/play` | **整局对局**：你出一手，AI 立即应手 | 会话 |
+| `GET  /v1/state?gid=` | **整局对局**：查询局面（只读） | 会话 |
+| `POST /v1/suggest` | **整局对局**：让 AI 给当前出牌方一手建议（可带解释） | 会话 |
+| `POST /v1/decide` | 决策一手（给局面快照，返回 AI 的选择 + 解释） | 无状态 |
+| `POST /v1/explain` | 解释整局里某一手（`moves` + `ply`） | 无状态 |
+| `POST /v1/analyze` | 单步分析：真实局面下 AI 会怎么打（人类手=反事实对照） | 无状态 |
+| `POST /v1/decode` | 动作码 → 具体牌面/牌型/归属（牌谱工具） | 无状态 |
+
+**主要需要"AI 出牌"就只用前四个**：`new_game` 开局 → 你 `play` 一手 → AI 自动应手 → 循环到终局。
 
 ---
 
@@ -374,31 +400,91 @@ curl -s https://chinesetestsite.com/pdk-ai/v1/health -H "X-API-Key: $KEY"
 
 ---
 
-### 3.5 `POST /v1/legal` — 合法动作与牌型判定（可选开关，默认关闭）
+### 3.5 合法动作从哪来？
 
-> 若调用方不想自己实现跑得快规则，可申请开启此接口（由服务端用同一内核判定）：
+对外**没有**单独的 `/v1/legal` 接口——合法动作直接随整局对局快照返回：`/v1/new_game`、`/v1/play`、`/v1/state` 的响应里都带 `legal`（数组的数组，牌 id 列表）与 `legal_pass`（是否可以过牌），
+且 `legal` 只在"轮到调用方"时非空。若你的客户端自己实现牌局、需要"给局面判合法手"，可申请开通无状态 `/v1/legal`（服务端用同一内核判定）。
 
-```
-POST /v1/legal
-{"my_hand": [...], "opp_n": 16, "history": [...], "opts": {...}}
--> {"legal": [[...], ...], "pass_allowed": false, "trick": [1,9,2,0], "trick_text": "对子Q"}
-```
+### 3.6 整局对局接口（推荐给"主要需要 AI 出牌"的调用方）
 
-`pass_allowed=true` 表示当前无牌可压，可以过牌。
-
----
-
-### 3.6 整局对局接口（可选：让机器人替你托管一整局）
-
-若你的客户端想直接"**和 AI 打一整局**"（服务端持有牌局状态，自动发牌、自动应手），可申请开启整局接口（服务端原生 API）：
+服务端持有牌局状态并自动发牌、自动让 AI 应手；调用方只需要出自己的那一手。**调用方固定坐座位 0，AI 坐座位 1。**
 
 | 接口 | 用途 |
 |---|---|
-| `POST /v1/new_game` | 开新局，返回 `gid`、你的手牌、`legal`(全部合法动作)、当前 `trick` |
-| `POST /v1/play` | 你出牌（或过牌），服务端执行并让 AI 立即应手，返回新局面 |
-| `GET  /v1/state?gid=` | 查询当前局面 |
+| `POST /v1/new_game` | 开新局；返回你的手牌、全部合法动作、当前要压的牌型 |
+| `POST /v1/play` | 你出一手（或过牌），**服务端立即让 AI 连续应手**，返回新局面 |
+| `GET  /v1/state?gid=` | 查询当前局面（只读，不推进） |
+| `POST /v1/suggest` | 让 AI 替**当前出牌方**给一手建议（不动局面），可带中文解释 |
 
-**接口保证**：响应返回时一定轮到你（AI 先手时它的开局动作已在服务端走完）。会话为进程内存态，超出并发/会话配额会被拒绝（`429`/`503`），不落盘你的牌局数据（若需要留存可与服务方约定）。
+**`POST /v1/new_game`**
+
+```json
+请求 {"opts": {"red10": true}, "mode": "hybrid"}     // opts/mode 均可省略
+响应 {
+  "gid": "81658db5598f4953a866be4a",
+  "you_are": 0, "ai_seat": 1,
+  "turn": 0, "finished": false, "winner": null,
+  "my_hand": [0,1,12,15,20,22,23,32,34,35,37,38,39,40,46,48],
+  "my_n": 16, "opp_n": 11,
+  "trick": [4, 2, 5, 0], "trick_text": "三带二5",
+  "last_moves": [{"seat": 1, "cards": [8,9,10,0,4]}],
+  "legal": [[...], ...], "legal_pass": false,
+  "scores": [0, 0], "mode": "hybrid", "opts": {"red10": true},
+  "moves": 1, "new": true
+}
+```
+
+- **保证**：返回时 `turn == 0`（轮到你）。若 AI 持黑桃 3 先手，它的开局动作已在服务端走完（`moves=1`、`opp_n` 已减少）。
+- `trick = null` 表示你是领出方（自由出牌）；否则按 §2.3 解读。
+
+**`POST /v1/play`**
+
+```json
+请求 {"gid": "81658db5...", "cards": [20, 21]}    // cards=[] 表示过牌（仅 legal_pass=true 时合法）
+响应 = 与 /v1/state 相同的完整快照（turn 必回到 0，或 finished=true）
+```
+
+- 非法出牌 → `400`；不是你的回合 → `409`。
+- **幂等/续打语义**：若上一次调用在 AI 应手中途失败（AI 异常、网络中断），**原样重发同一个请求**即可继续——此时轮次已是 AI，服务只补完 AI 的应手，不会重复落下你那一手。
+- `scores` 在 `finished=true` 时有效：底分 1 分/张、炸弹 10 分/颗、红桃 10 翻倍（`red10`）、对手一张未出翻倍（关门），与网页版计分逐局对账一致。
+
+**`POST /v1/suggest`**（给"当前该出牌的一方"，一般就是你自己）
+
+```json
+请求 {"gid": "81658db5...", "explain": true}
+响应 {"cards": [36, 37], "pass": false, "seat": 0, "mode": "hybrid", "legal_count": 33,
+      "explain": {"path": "pimc_c", "text": "对子QQ",
+                  "reason": "在 32 个采样世界里求解, 对子QQ 的胜率最高 (62%)。…"}}
+```
+
+可用于"AI 帮我这一手"（把 `cards` 交给 `/v1/play` 即可）或"AI 自动托管整局"。
+`cards=[]` + `pass=true` 表示 AI 建议过牌（合法前提：`legal_pass=true`）。
+
+**完整对局示例（Python）**
+
+```python
+import requests
+KEY = "pdk_live_xxxxxxxx"
+BASE = "https://chinesetestsite.com/pdk-ai/v1"
+H = {"X-API-Key": KEY, "Content-Type": "application/json"}
+
+g = requests.post(f"{BASE}/new_game", headers=H, json={"opts": {"red10": True}}).json()
+gid = g["gid"]
+print("我的牌:", g["my_hand"], "| 要压:", g.get("trick_text") or "（我领出）")
+
+while not g["finished"]:
+    legal = g["legal"]
+    move = max(legal, key=lambda c: sum(c))          # 这里随便挑一手；真实客户端按自己的策略选
+    r = requests.post(f"{BASE}/play", headers=H, json={"gid": gid, "cards": move}, timeout=60)
+    if r.status_code in (429, 502, 503):
+        continue                                      # 限流/抖动：稍等重发同一请求即可（幂等）
+    r.raise_for_status()
+    g = r.json()
+
+print("终局：赢家", g["winner"], "比分", g["scores"])
+```
+
+> 数据归属：对外实例把牌局落盘在**独立目录**（`data/external/`），与主站对局记录、人工点评完全隔离；如果你的对局希望被留存分析，可与服务方约定。
 
 ---
 
@@ -411,6 +497,9 @@ POST /v1/legal
 5. **决策不确定性**：残局 PIMC 与开局搜索带随机世界采样，同一局面多次调用**可能出现不同选择**（属设计特性，用于覆盖不确定性）；需要可复现可用 `opts`+固定 `seed` 的私有部署（另行沟通）。
 6. **不要缓存过期决策**：`my_hand`/`opp_n`/`history` 任一变化都必须重新请求。
 7. **上生产前**：先用 `/v1/health` 确认 `netProbe.net = a2c-final56(56x)`，并做一次 100 次的压测对账（`legal_count`、`pass` 分布）。
+8. **整局对局别并发同一个 gid**：AI 应手串行计算（对外实例内部并发闸=1），并发调用会拿到 `429/503`；顺序调用即可。
+9. **会话会过期**：`gid` 空闲 2 小时自动回收，过期后 `/v1/play` 返回 `404`，重新 `/v1/new_game` 即可。
+10. **决策带随机性**：残局 PIMC 与开局搜索带世界采样，同一局面多次调用可能给出不同但同样正确的选择（设计特性）；需要完全可复现请与 service 方约定固定种子实例。
 
 ---
 
@@ -460,6 +549,10 @@ print(d["move"], d["pass"], d.get("explain", {}).get("reason"))
 | 公开路径 | 内网路径（127.0.0.1:8766） |
 |---|---|
 | `/v1/health` | `GET /health` |
+| `/v1/new_game` | `POST /api/new_game` |
+| `/v1/play` | `POST /api/play` |
+| `/v1/state` | `GET /api/state?gid=` |
+| `/v1/suggest` | `POST /api/suggest`（网页版同源：`POST /suggest {sid}`） |
 | `/v1/decide` | `POST /api/decide` |
 | `/v1/explain` | `POST /api/explain`（会话版：`POST /api/explain {sid, ply}`） |
 | `/v1/analyze` | `POST /api/analyze`（会话版：`POST /api/analyze {sid, ply}`） |

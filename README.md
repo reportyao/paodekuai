@@ -169,6 +169,25 @@ python3 -m json.tool "$(ls -t /home/ubuntu/paodekuai/data/replays/*.json | head 
 
 - 网页 API：`GET /replays/list`、`GET /replays/get?no=H0002`、`POST /replays/comment {no,text,ply}`。
 
+## 🌐 对外 API（把 AI 提供给其他调用方）
+
+对外走**独立实例 + 网关**，与自己玩的对局实例物理隔离（外部流量抢不到你游戏的算力）：
+
+```
+调用方 ──HTTPS──▶ nginx /pdk-ai/ ──▶ 网关 127.0.0.1:8770 ──▶ 对外 AI 实例 127.0.0.1:8776
+                     (limit_req)      Key/配额/审计            --public-api（无会话协议）
+你的网页版 ──▶ 8310 ──/ai/*──▶ 本机 AI 实例 127.0.0.1:8766（含会话协议，仅内网）
+```
+
+- 入口：`https://chinesetestsite.com/pdk-ai/v1/*`（HTTPS，现有域名与证书）
+- 鉴权：`X-API-Key`（Key 与配额在 `/etc/paodekuai-api/keys.json`，改完自动热加载）
+- 接口：`/v1/new_game`、`/v1/play`、`/v1/state`、`/v1/suggest`（整局对局，AI 自动应手）、
+  `/v1/decide`、`/v1/explain`、`/v1/analyze`、`/v1/decode`（无状态）、`/v1/health`（免 Key，含模型版本号）
+- 服务：`paodekuai-api.service`（对外实例）、`pdkai-gateway.service`（网关）
+- 审计：`/var/log/paodekuai-api.log`（时间/Key名/接口/状态/耗时，不含明文 Key）
+- 文档：[docs/AI_API.md](docs/AI_API.md)（给调用方）；[docs/API开放方案.md](docs/API开放方案.md)（架构与运维）
+- 数据隔离：对外牌局落盘 `data/external/`，主站对局记录与人工点评不受影响
+
 ## 🤖 AI 出牌解释（明牌看牌 + 复盘分析）
 
 AI 模型自带解释能力（pdk-ai 的 `POST /api/explain`、`POST /api/decide` + `"explain": true`），网页版把它接到两个场景：

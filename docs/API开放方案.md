@@ -1,5 +1,28 @@
 # 跑得快 AI · 对外开放方案（v1）
 
+> **实施状态（2026-09-15）：已按第 4 节顺序落地并验证通过。**
+>
+> | 项 | 实际状态 |
+> |---|---|
+> | AI 内核 | `pdk-ai` 已升级到 `9cf7a7a`（开局搜索时间预算可配置 + 置信度画像）；四项冒烟（规则/C 对拍 17468 例/残局）全过，资产 md5 全部 OK |
+> | 网页版实例 | `paodekuai-ai.service`（127.0.0.1:8766，含会话协议），重启后自动恢复进行中对局（实测 13 局） |
+> | 对外实例 | `paodekuai-api.service`（127.0.0.1:8776，`--public-api`：只开 8 个接口 + health；`CPUWeight=100`、`MemoryMax=1G`、会话≤64、空闲 2h 回收、决策排队超时 30s） |
+> | 网关 | `pdkai-gateway.service`（127.0.0.1:8770）：API Key 鉴权、按 Key 速率/并发/日配额、可选 IP 白名单、审计日志 `/var/log/paodekuai-api.log`（不含明文 Key） |
+> | 公网入口 | `https://chinesetestsite.com/pdk-ai/v1/*`（nginx `location /pdk-ai/` + `limit_req` 5r/s 兜底；用现有证书，无需新 DNS） |
+> | API Key | `/etc/paodekuai-api/keys.json`（600 权限）：`外部调用方A` → 120 次/分、并发 1、5 万次/天、`allowed_ips: []` |
+> | 数据隔离 | 对外牌局落盘在 `data/external/`（主站 `data/replays/` 与人工点评不受影响；外部实例不加载任何主站会话） |
+> | 回滚 | 注释 nginx `location /pdk-ai/` → `nginx -t && systemctl reload nginx`；或 `sudo systemctl stop paodekuai-api pdkai-gateway` |
+> | 待办 | ① 调用方出口 IP 固定的话把 IP 填进 `allowed_ips`（改完自动热加载，无需重启）；② 若对方要多并发/更高配额，再评估独立节点 |
+>
+> 常用运维命令：
+> ```bash
+> sudo systemctl status paodekuai-api pdkai-gateway
+> sudo cat /etc/paodekuai-api/keys.json          # 取/改 Key（改完网关自动热加载）
+> tail -f /var/log/paodekuai-api.log             # 审计：时间/Key名/接口/状态/耗时
+> curl -s https://chinesetestsite.com/pdk-ai/v1/health | python3 -m json.tool
+> ```
+
+---
 面向"把 AI 提供给他人调用"的落地方案：现状核查 → 开放架构 → 安全与配额 → 部署步骤 → 回滚。
 
 ---

@@ -1853,11 +1853,15 @@ async function refreshAIVersion() {
     const md5 = (r.assets && r.assets.files && r.assets.files['ckpt/policy_a2c_final56.pt']) === 'OK';
     const cfg = r.productionConfig || {};
     const probe = r.netProbe || {};
+    const commit = r.pdkCommit || {};
     const isFallback = probe.net && probe.net.indexOf('final56') < 0;
     el.classList.toggle('warn', !!isFallback);
     el.innerHTML = 'AI 模型：<b>' + (r.productionModel || '未知') + '</b>' +
       (md5 ? ' <span class="ok">md5✓</span>' : ' <span class="bad">md5✗</span>') +
+      (commit.hash ? ' ｜ 版本：<b>' + esc(commit.hash) + '</b>' +
+        (commit.date ? ' <span class="dim">(' + esc(commit.date) + ')</span>' : '') : '') +
       ' ｜ 开局搜索：<b>' + (cfg.openingSearch ? '开' : '关') + '</b>' +
+      (cfg.openingBudget != null ? '(≤' + cfg.openingBudget + 's)' : '') +
       ' ｜ 双模式：' + (r.modes || []).join('/') +
       ' ｜ 实际加载：<b>' + (probe.net || '未知') + '</b>' +
       (isFallback ? ' <span class="bad">⚠ 已回退旧网络</span>' : ' <span class="ok">在线</span>');
