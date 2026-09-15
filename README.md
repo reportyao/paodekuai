@@ -187,6 +187,11 @@ python3 -m json.tool "$(ls -t /home/ubuntu/paodekuai/data/replays/*.json | head 
 - 审计：`/var/log/paodekuai-api.log`（时间/Key名/接口/状态/耗时，不含明文 Key）
 - 文档：[docs/AI_API.md](docs/AI_API.md)（给调用方）；[docs/API开放方案.md](docs/API开放方案.md)（架构与运维）
 - 数据隔离：对外牌局落盘 `data/external/`，主站对局记录与人工点评不受影响
+- **AI 内核版本与配方**：桥直接采用上游 `server.PROD_SOLVER_KW`（fca98a0 起为
+  `engine=dual` + `num_threshold≤16` + `exact_worlds_total≤16` 残局穷举 + 数值计分，盲顶牌偏置关闭）；
+  `/health` 的 `productionConfig` 会自述生效值（含 `nodeCap`/`exactWorldsCap`/`commit`），首页版本行同步显示。
+  评审与已发现的上游缺陷见 [docs/AI内核评审-fca98a0.md](docs/AI内核评审-fca98a0.md)；
+  需要 A/B 时可用环境变量覆盖：`PDK_NODE_CAP`、`PDK_EXACT_WORLDS_CAP`（默认跟随上游）
 - 主站入口加固：`server.py` 对 `/ai/*` 代理加了按 IP 限流（默认 300 次/分钟，`PDK_AI_RATE=0` 关闭），
   防脚本刷量耗尽 AI 算力；真人打牌实测峰值 42 次/分钟，不受影响
 - 自测（服务器可直接跑）：`selftest_api.py`(59 项) ・`selftest_core.py`(21 项，需 `PDK_BOT_ROOT`) ・

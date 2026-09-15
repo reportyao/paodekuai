@@ -83,7 +83,51 @@ from pdk.fast import PASS_CODE       # noqa: E402
 #   生产模型 = ckpt/policy_a2c_final56.pt (A2C + 56维动作后特征)
 #   hybrid = SolverAgent(hybrid, threshold=28) + _QFB(final56) + 规则层 R0-R3 —— 胜率优先(生产配置)
 #   dual   = 同上但 SolverAgent(engine='dual', <=14张数值计分接力)      —— 积分制净分优先
-PROD_MODES = {"hybrid": "c", "dual": "dual"}
+PROD_MODES = ("hybrid", "dual")      # hybrid=上游生产配方（胜率优先→净分）；dual=同配方关胜率带（纯净分）
+
+
+# 可选覆盖（默认严格跟随上游配方；用于 A/B 与上游修复后的快速验证）：
+#   PDK_NODE_CAP=200000000        求解节点预算（注意：C 侧是**整批共享**预算）
+#   PDK_EXACT_WORLDS_CAP=120      残局穷举世界上限（世界数×候选数 ≈ 批量单元数）
+#   PDK_WIN_RATE_TOL=2.0          胜率容差带（越大越偏净分）
+def _env_int(name):
+    v = os.environ.get(name)
+    try:
+        return int(v) if v not in (None, "") else None
+    except ValueError:
+        return None
+
+
+def _env_float(name):
+    v = os.environ.get(name)
+    try:
+        return float(v) if v not in (None, "") else None
+    except ValueError:
+        return None
+
+
+def prod_solver_kw() -> dict:
+    """上游生产配方参数（server.PROD_SOLVER_KW）+ 可选环境覆盖。
+
+    fca98a0 起上游把生产配方改为：engine='dual' + num_threshold<=16 数值计分 +
+    exact_worlds_total<=16 残局穷举世界 + 盲顶牌偏置关闭。旧版内核没有该常量，
+    这里自动退回旧参数（并在 /health 标注真实生效值），避免"悄悄用旧配方"。
+
+    注意（已实测的上游缺陷）：`node_cap` 在 C 侧是**整批共享**预算，
+    440 世界×8 候选≈3520 个求解单元时，生产默认 2M 只能解出约 0.4%，
+    未解单元被跳过 ⇒ 期望分建立在有偏子集上、且结果随调用历史变化（不可复现）。
+    若要让它真正生效，应同时放大预算并缩小世界集（见 README 的对外文档/评审结论）。
+    """
+    kw = getattr(bot_server, "PROD_SOLVER_KW", None)
+    if not (isinstance(kw, dict) and kw):
+        kw = {"total_threshold": 28, "max_rows": 400000, "engine": "c"}
+    ncap = _env_int("PDK_NODE_CAP")
+    if ncap:
+        kw["node_cap"] = ncap
+    ecap = _env_int("PDK_EXACT_WORLDS_CAP")
+    if ecap:
+        kw["exact_worlds_cap"] = ecap
+    return kw
 
 
 def net_info(fb) -> str:
@@ -154,11 +198,19 @@ def prod_config_info() -> dict:
         import inspect
         from pdk.agents import SolverAgent
         pr = inspect.signature(SolverAgent.__init__).parameters
+        kw = prod_solver_kw()
         info = {
+            "nodeCap": int(kw.get("node_cap", 2_000_000)),
             "openingSearch": bool(pr["opening_search"].default),   # 桥未覆盖 → 生效=类默认
             "openingWorlds": int(pr["opening_worlds"].default),
-            "totalThreshold": 28,        # 桥显式传入（与生产 build_ai 同值）
-            "overrides": "total_threshold=28, max_rows=400000",
+            "totalThreshold": int(kw.get("total_threshold", 28)),
+            "engine": kw.get("engine", "c"),                       # fca98a0 起生产用 dual
+            "numThreshold": int(kw.get("num_threshold", 0)),       # ≤N 张走数值计分
+            "exactWorldsTotal": int(kw.get("exact_worlds_total", 0)),   # ≤N 张残局穷举世界
+            "exactWorldsCap": int(kw.get("exact_worlds_cap", 0)),
+            "topPull": float(kw.get("top_pull", 0.0)),
+            "topGuardOpp": int(kw.get("top_guard_opp", 0)),
+            "overrides": "PROD_SOLVER_KW（上游生产配方）",
             "commit": pdk_commit_info().get("hash", ""),
         }
         if "opening_budget" in pr:       # 新版开局搜索时间预算（9cf7a7a+）
@@ -191,13 +243,13 @@ def verify_assets() -> dict:
     return out
 
 
-def build_prod_agent(engine: str):
-    """按生产 server.build_ai() 同源构建智能体，只有 SolverAgent 的 engine 可选。
+def build_prod_agent(mode: str = "hybrid"):
+    """按上游生产配方构建智能体（server.PROD_SOLVER_KW，与 server.build_ai 同源）。
 
-    fallback 直接用官方 server._QFB() —— 即生产模型 final56
-    (273 obs + 56 维动作后特征) + R3 开局结构守护；checkpoint 缺失时它自己回退 DMC。
-    R0(一手走完)/R1(报单保权) 在 pdk/agents.py，R2(残局连续保权) 在 pdk/endgame_order.py，
-    均随 SolverAgent 无条件生效。
+    mode="hybrid"：上游生产配方（dual 引擎 + 残局穷举 + 数值计分；胜率优先、同胜率比净分）
+    mode="dual"  ：同配方但关掉胜率带 → 纯期望净分（积分制场合）
+    fallback 用官方 server._QFB()（final56 + R3）；checkpoint 缺失直接报错（不降级）。
+    R0(一手走完)/R1(报单保权)/R2(残局连续保权)/R3(开局结构守护) 随 SolverAgent 无条件生效。
     """
     from pdk.agents import SolverAgent
     fb = bot_server._QFB()                     # 生产 fallback: final56 + R3
@@ -205,9 +257,24 @@ def build_prod_agent(engine: str):
         # 不降级策略：宁可报错，也不用旧 DMC 网络糊弄玩家
         raise RuntimeError("生产模型 ckpt/policy_a2c_final56.pt 未加载成功"
                            "（检测到 pdk 内部回退到旧网络）——按不降级策略拒绝服务")
-    agent = SolverAgent(fb, bot_server.CFG, total_threshold=28,
-                        max_rows=400000, engine=engine)
-    return agent, ("hybrid" if engine == "c" else engine), net_info(fb)
+    mode = mode if mode in PROD_MODES else "hybrid"
+    kw = prod_solver_kw()
+    if mode == "dual":
+        kw.setdefault("win_rate_tol", 2.0)     # hmm: 见下方 setattr（旧内核无此参数）
+    try:
+        agent = SolverAgent(fb, bot_server.CFG, **kw)
+    except TypeError:
+        # 旧内核不认新参数：退回最小公共集（并保留引擎选择）
+        agent = SolverAgent(fb, bot_server.CFG, total_threshold=kw.get("total_threshold", 28),
+                            max_rows=kw.get("max_rows", 400000),
+                            engine=kw.get("engine", "c"))
+    if mode == "dual":
+        # 关掉"先按胜率筛"的容差带 → 候选池=全部，按期望净分选优
+        try:
+            agent.win_rate_tol = 2.0
+        except Exception:
+            pass
+    return agent, mode, net_info(fb)
 
 
 SESSIONS: dict = {}
@@ -432,8 +499,7 @@ class Shadow:
         self.time_text = time.strftime("%Y-%m-%d %H:%M:%S")
         self.ts_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         self.cfg = build_cfg(opts)
-        engine = PROD_MODES.get(prod_mode, "c")
-        self.prod_mode = "hybrid" if engine == "c" else prod_mode
+        self.prod_mode = prod_mode if prod_mode in PROD_MODES else "hybrid"
         h0, h1, k = sorted(hands[0]), sorted(hands[1]), sorted(kitty)
         if not (len(h0) == len(h1) == 16):
             raise ApiError(f"两手牌各需 16 张（当前 {len(h0)}/{len(h1)}）")
@@ -443,7 +509,7 @@ class Shadow:
             raise ApiError("手牌+底牌必须恰好构成 48 张固定牌库（牌 id 见文档 §2.1）")
         self.game = Game(cfg=self.cfg, first_player=leader, hands=[h0, h1], kitty=k)
         self.cg = fast.CGame(counts_of_ids(h0), counts_of_ids(h1), leader, self.cfg)
-        self.agent, self.mode, self.net = build_prod_agent(engine)
+        self.agent, self.mode, self.net = build_prod_agent(self.prod_mode)
         self.ai_seat = 1
         self.agent.new_game(self.ai_seat, list(self.game.cnt[self.ai_seat]))
         self.codes = []
@@ -699,7 +765,7 @@ def do_suggest(p):
         }
         cfg, mode = s.cfg, s.prod_mode
     with decide_gate():
-        out = _decide_core(payload, cfg, PROD_MODES.get(mode, "c"))
+        out = _decide_core(payload, cfg, mode)
     res = {"cards": out.get("move") or [], "pass": bool(out.get("pass")),
            "seat": seat, "mode": mode, "legal_count": out.get("legal_count")}
     if out.get("explain"):
@@ -1042,12 +1108,11 @@ def do_decide(p: dict):
     mode = str(p.get("mode", "hybrid")).lower()
     if mode not in PROD_MODES:
         raise ApiError(f"未知 mode {mode!r}（可选 hybrid|dual）")
-    engine = PROD_MODES[mode]
     cfg = build_cfg(check_opts(p.get("opts")))
     with decide_gate():
-        out = _decide_core(p, cfg, engine)
-    out["mode"] = "hybrid" if engine == "c" else mode
-    out["engine"] = engine
+        out = _decide_core(p, cfg, mode)
+    out["mode"] = mode
+    out["engine"] = prod_solver_kw().get("engine", "c")
     try:
         out["openingSearch"] = prod_config_info().get("openingSearch", None)
     except Exception:
@@ -1073,8 +1138,8 @@ def _check_trick(trick):
     return [pt, main, ln, nc]
 
 
-def _decide_core(payload: dict, cfg, engine: str = "c") -> dict:
-    """与 pdk-ai server._decide 同源的单步决策，但 **规则 cfg 与 engine 可选**。
+def _decide_core(payload: dict, cfg, mode: str = "hybrid") -> dict:
+    """与 pdk-ai server._decide 同源的单步决策，但 **规则 cfg 与模式可选**。
 
     为什么自己实现：调用方（网页版/外部）可能带 opts（如"炸弹不可拆"），而上游 /api/decide
     用的是模块级 CFG（= Config() 默认）。这里把上游 _decide 的完整流程复刻一遍，关键点
@@ -1111,10 +1176,24 @@ def _decide_core(payload: dict, cfg, engine: str = "c") -> dict:
     fb.opp_p = st["last_was_pass"]
     fb.opening = (st["my_lead_count"] == 0) and (not st["incomplete"])
 
-    ag = SolverAgent(fb, cfg, total_threshold=28, max_rows=400000, engine=engine)
+    kw = prod_solver_kw()
+    try:
+        ag = SolverAgent(fb, cfg, **kw)
+    except TypeError:                          # 旧内核不认新参数
+        ag = SolverAgent(fb, cfg, total_threshold=kw.get("total_threshold", 28),
+                         max_rows=kw.get("max_rows", 400000),
+                         engine=kw.get("engine", "c"))
+    if mode == "dual":                         # 净分优先：关胜率带
+        try:
+            ag.win_rate_tol = 2.0
+        except Exception:
+            pass
     ag.new_game(0, my_cnt, [0] * N_RANKS)
     ag.belief = belief
     ag.oracle_cnt = None
+    # 记牌账本：残局穷举"未见面牌池"必需（无状态路径没有 observe，需从 history 注入；
+    # 上游 server._decide 同样处理 —— 漏掉会让穷举按"双方都没出过牌"的错误牌池计算）
+    ag._played = [list(st["played_me"]), list(st["played_opp"])]
     # 已领出次数写入门控（残缺快照绝不伪开局）
     ag._lead_idx = 10 ** 9 if st["incomplete"] else st["my_lead_count"]
 
