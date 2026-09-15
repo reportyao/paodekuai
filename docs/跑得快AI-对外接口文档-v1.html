@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>跑得快 AI 策略服务 · 接口文档 v1</title><style>
+:root { --fg:#1c2530; --dim:#5b6b7c; --line:#e3e8ee; --accent:#1f6feb;
+        --code-bg:#f6f8fa; --callout:#fff8e6; --callout-line:#f0c14b; }
+* { box-sizing: border-box; }
+body { margin:0; background:#f2f5f8; color:var(--fg);
+       font:16px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",
+            "Hiragino Sans GB","Microsoft YaHei",sans-serif; }
+.wrap { max-width: 980px; margin: 0 auto; padding: 32px 20px 80px; }
+main { background:#fff; border:1px solid var(--line); border-radius:14px;
+       padding: 40px 44px; box-shadow:0 6px 24px rgba(20,40,70,.06); }
+h1 { font-size:26px; margin:0 0 6px; padding-bottom:14px; border-bottom:2px solid var(--line); }
+h2 { font-size:21px; margin:38px 0 12px; padding-top:22px; border-top:1px solid var(--line); }
+h2:first-of-type { border-top:none; padding-top:0; }
+h3 { font-size:17px; margin:26px 0 10px; color:#123; }
+p, li { color:var(--fg); }
+a { color:var(--accent); text-decoration:none; }
+a:hover { text-decoration:underline; }
+code { background:var(--code-bg); border:1px solid var(--line); border-radius:5px;
+       padding:1px 5px; font:14px/1.5 "SFMono-Regular",Consolas,"Liberation Mono",monospace; }
+pre { background:var(--code-bg); border:1px solid var(--line); border-radius:10px;
+      padding:14px 16px; overflow:auto; }
+pre code { background:none; border:none; padding:0; font-size:13.5px; line-height:1.6; }
+table { border-collapse:collapse; width:100%; margin:14px 0; font-size:14.5px; display:block; overflow-x:auto; }
+th, td { border:1px solid var(--line); padding:8px 12px; text-align:left; vertical-align:top; }
+th { background:#f7f9fc; white-space:nowrap; }
+tbody tr:nth-child(even) { background:#fbfcfe; }
+blockquote { margin:14px 0; padding:12px 16px; background:var(--callout);
+             border-left:4px solid var(--callout-line); border-radius:0 8px 8px 0; }
+blockquote p { margin:0; }
+hr { border:none; border-top:1px solid var(--line); margin:30px 0; }
+ul, ol { padding-left:26px; }
+li { margin:4px 0; }
+.meta { color:var(--dim); font-size:13px; margin:0 0 22px; }
+.toc { background:#fff; border:1px solid var(--line); border-radius:12px;
+       padding:16px 20px; margin:0 0 22px; }
+.toc b { display:block; margin-bottom:6px; font-size:14px; color:var(--dim); letter-spacing:.04em; }
+.toc a { display:inline-block; margin:2px 14px 2px 0; font-size:14px; }
+@media print { body{background:#fff} .wrap{padding:0} main{border:none;box-shadow:none;padding:0}
+                .toc{page-break-after:always} h2{page-break-after:avoid} pre,table{page-break-inside:avoid} }
+</style></head>
+<body><div class="wrap">
+<nav class="toc"><b>目录</b><a href="#h0">0. 5 分钟跑通（推荐路径：整局对局）</a><a href="#h1">1. 接入信息</a><a href="#h4">2. 数据模型（全局约定）</a><a href="#h10">3. 接口</a><a href="#h20">4. 最佳实践</a><a href="#h21">5. 版本与兼容</a><a href="#h22">附录 A：规则要点（服务假设的规则）</a><a href="#h23">附录 B：curl 示例</a><a href="#h24">附录 C：联调清单</a></nav>
+<main><h1>跑得快 AI 策略服务 · 接口文档 v1</h1>
+<blockquote><p><b>服务内容</b>：整局对局托管（服务端发牌、AI 自动应手、你只需出自己的手）+ 单步决策 / 复盘分析 / 牌谱解码接口。</p></blockquote>
+<blockquote><p><b>内核</b>：生产模型 <code>policy_a2c_final56.pt</code>（A2C 策略网络 + 残局精确求解器 + 规则层），与线上人机对战同一套内核。</p></blockquote>
+<blockquote><p><b>牌规</b>：两人跑得快（48 张牌；去大小王、三张 2、一张 A；黑桃 2 为最大单张；有牌必打；三张/三带一仅末手；顺子不含 2；炸弹 3333–KKKK）。</p></blockquote>
+<hr>
+<h2 id="h0">0. 5 分钟跑通（推荐路径：整局对局）</h2>
+<pre><code>
+import requests
+
+KEY  = "在此填入服务方提供的 API Key"          # 形如 pdk_live_xxxx
+BASE = "https://chinesetestsite.com/pdk-ai/v1"
+H    = {"X-API-Key": KEY, "Content-Type": "application/json"}
+
+# 1) 开新局：服务端发牌，返回你的手牌与全部合法出法
+g = requests.post(f"{BASE}/new_game", headers=H, json={"opts": {"red10": True}}, timeout=60).json()
+gid = g["gid"]
+print("我的牌:", g["my_hand"], "| 要压:", g.get("trick_text") or "（我领出）")
+
+# 2) 循环：你出一手 → 服务端让 AI 连续应手 → 再轮到你
+while not g["finished"]:
+    legal = g["legal"]                      # 全部合法出法（牌 id 数组的数组），[] 表示过牌
+    move  = legal[0]                        # ← 换成你自己的策略
+    r = requests.post(f"{BASE}/play", headers=H, json={"gid": gid, "cards": move}, timeout=60)
+    if r.status_code in (429, 502, 503):
+        continue                            # 限流/抖动：稍等重发**同一请求**即可（幂等，不会重复落子）
+    r.raise_for_status()
+    g = r.json()                            # 返回时一定又轮到你（或 finished=true）
+
+print("终局：赢家座位", g["winner"], "比分", g["scores"])
+</code></pre>
+<p>服务端保证：<b>每次响应返回时都轮到你</b>（若 AI 持黑桃 3 先手，它的开局动作已在服务端走完）。</p>
+<hr>
+<h2 id="h1">1. 接入信息</h2>
+<table><thead><tr><th>项</th><th>值</th></tr></thead><tbody>
+<tr><td>公网基址</td><td><code>https://chinesetestsite.com/pdk-ai/v1</code></td></tr>
+<tr><td>传输</td><td>HTTPS（TLS 1.2/1.3），请求与响应均为 <code>application/json; charset=utf-8</code></td></tr>
+<tr><td>鉴权</td><td>请求头 <code>X-API-Key: &lt;你的Key&gt;</code>（也支持 <code>Authorization: Bearer &lt;你的Key&gt;</code>）</td></tr>
+<tr><td>免鉴权接口</td><td><code>GET /v1/health</code>（可用于探活）</td></tr>
+<tr><td>CORS</td><td>允许任意来源，浏览器可直接调用</td></tr>
+<tr><td>请求体上限</td><td>256 KB；<code>history</code> ≤ 500 条、<code>my_hand</code> ≤ 20 张</td></tr>
+<tr><td>超时</td><td>服务端到内核 60 秒；nginx 读超时 65 秒</td></tr>
+<tr><td>服务版本</td><td><code>GET /v1/health</code> 的 <code>pdkCommit.hash</code> / <code>productionConfig</code> 会给出当前内核版本与配置</td></tr>
+<tr><td>数据留存</td><td>对局过程会被服务端留存（用于服务运行与质量分析），<b>不会对外提供</b>；如你的场景要求不留存，请提前告知</td></tr>
+</tbody></table>
+<h3 id="h2">1.1 限流与配额（当前档，可按需调整）</h3>
+<table><thead><tr><th>限制项</th><th>当前值</th><th>超限返回</th></tr></thead><tbody>
+<tr><td>速率</td><td>120 次/分钟</td><td><code>429</code> + <code>Retry-After</code></td></tr>
+<tr><td>并发</td><td>1 个进行中请求</td><td><code>429</code> + <code>Retry-After: 2</code></td></tr>
+<tr><td>日配额</td><td>50 000 次/天</td><td><code>429</code> + <code>Retry-After: 3600</code></td></tr>
+<tr><td>单 IP 兜底</td><td>5 次/秒（burst 10）</td><td><code>429</code></td></tr>
+</tbody></table>
+<blockquote><p>AI 决策是 CPU 密集型（残局会做枚举求解），<b>请顺序调用、不要并发轰炸</b>；需要更高吞吐请与服务方联系。</p></blockquote>
+<h3 id="h3">1.2 错误响应</h3>
+<p>所有错误统一为 <code>{"error": "说明文字"}</code>：</p>
+<table><thead><tr><th>HTTP</th><th>含义</th><th>处理建议</th></tr></thead><tbody>
+<tr><td>200</td><td>成功</td><td>—</td></tr>
+<tr><td>400</td><td>参数缺失/格式错误/牌 id 越界/牌谱不合法</td><td>修正请求，不要重试</td></tr>
+<tr><td>401</td><td>缺少或无效 API Key</td><td>检查请求头</td></tr>
+<tr><td>403</td><td>来源 IP 不在白名单</td><td>联系服务方</td></tr>
+<tr><td>404</td><td>未知接口，或 <code>gid</code> 不存在/已过期（会话空闲 2 小时回收）</td><td>重新 <code>/v1/new_game</code></td></tr>
+<tr><td>409</td><td>现在不是你的回合</td><td>先 <code>/v1/state</code> 对账</td></tr>
+<tr><td>413</td><td>请求体或字段过大</td><td>精简 <code>history</code></td></tr>
+<tr><td>429</td><td>速率/并发/日配额超限</td><td>按 <code>Retry-After</code> 退避重试</td></tr>
+<tr><td>500</td><td>AI 内核异常（服务<b>不做降级</b>，绝不返回猜测结果）</td><td>可重试 1–2 次；持续失败请联系服务方</td></tr>
+<tr><td>502</td><td>服务端到 AI 内核不可达/超时</td><td>指数退避重试</td></tr>
+<tr><td>503</td><td>服务繁忙（全局并发已满，排队超时）</td><td>按 <code>Retry-After</code> 重试</td></tr>
+</tbody></table>
+<hr>
+<h2 id="h4">2. 数据模型（全局约定）</h2>
+<h3 id="h5">2.1 牌 ID</h3>
+<ul>
+<li><code>id ∈ [0, 48]</code>，共 <b>48</b> 张（<b>含 48，不含 47</b>）</li>
+</ul>
+<ul>
+<li>点数 = <code>id &gt;&gt; 2</code>：<code>0=3, 1=4, 2=5, 3=6, 4=7, 5=8, 6=9, 7=10, 8=J, 9=Q, 10=K, 11=A, 12=2</code></li>
+</ul>
+<ul>
+<li>花色 = <code>id &amp; 3</code>：<code>0=黑桃, 1=红桃, 2=梅花, 3=方片</code></li>
+</ul>
+<ul>
+<li>牌库：3~K 各 4 张（id 0–43）、A 3 张（id 44/45/46）、黑桃 2（<b>id 48</b>）；id 47 与 49/50/51 不在牌库中</li>
+</ul>
+<ul>
+<li>花色只影响显示与红桃 10 翻倍，<b>策略与合法性只看点数</b></li>
+</ul>
+<pre><code>
+rank_of = lambda c: c &gt;&gt; 2          # 0=3 … 11=A, 12=2
+RANK_CN = "3456789XJQKA2"           # X = 10
+SUIT_CN = "♠♥♣♦"
+</code></pre>
+<h3 id="h6">2.2 出牌与过牌</h3>
+<ul>
+<li>出牌 = 牌 id 数组，例如 <code>[36, 37]</code> 表示"一对 Q"</li>
+</ul>
+<ul>
+<li>过牌 = 空数组 <code>[]</code>（仅当当前无牌可压时合法，见响应字段 <code>legal_pass</code>）</li>
+</ul>
+<h3 id="h7">2.3 牌型元组 <code>trick</code>（"台上要压的牌"）</h3>
+<p><code>trick = [ptype, main, len, nc]</code>；<code>null</code> 表示<b>你是领出方</b>（自由出牌）。</p>
+<table><thead><tr><th>ptype</th><th>名称</th><th>说明</th><th>main</th><th>len</th></tr></thead><tbody>
+<tr><td>0</td><td>单张</td><td>—</td><td>点数</td><td>1</td></tr>
+<tr><td>1</td><td>对子</td><td>—</td><td>点数</td><td>2</td></tr>
+<tr><td>2</td><td>连对</td><td>≥2 连对（7788）</td><td><b>最大</b>点数</td><td>组数（3 对 = 3）</td></tr>
+<tr><td>3</td><td>三张</td><td>仅末手可出/接</td><td>点数</td><td>3</td></tr>
+<tr><td>4</td><td>三带二</td><td>555+3+4</td><td>三张点数</td><td>5</td></tr>
+<tr><td>5</td><td>三带一</td><td>仅末手</td><td>三张点数</td><td>4</td></tr>
+<tr><td>6</td><td>飞机</td><td>三张连（需变体开关）</td><td>最大点数</td><td>—</td></tr>
+<tr><td>7</td><td>顺子</td><td>≥5 连张，不含 2</td><td><b>最大</b>点数</td><td>张数</td></tr>
+<tr><td>8</td><td>炸弹</td><td>3333–KKKK</td><td>点数</td><td>4</td></tr>
+<tr><td>9</td><td>四带三</td><td>需变体开关 <code>four3</code></td><td>四张点数</td><td>7</td></tr>
+</tbody></table>
+<blockquote><p>两点提示：① 顺子/连对的 <code>main</code> 是<b>最大点数</b>（顺子 3-4-5-6-7 → <code>main=4</code>，即 7）；② <code>nc</code> 是内核附加计数（炸弹为 1，其余为 0）。</p></blockquote>
+<blockquote><p><b>正常情况下你不需要自己构造 <code>trick</code></b> —— 整局对局接口的每个响应都会带给你当前 <code>trick</code> 与 <code>legal</code>。</p></blockquote>
+<p><b>联调测试向量</b>（可直接用于对齐实现）：</p>
+<table><thead><tr><th>出牌</th><th>牌 id</th><th>trick</th></tr></thead><tbody>
+<tr><td>单张 3</td><td><code>[0]</code></td><td><code>[0, 0, 1, 0]</code></td></tr>
+<tr><td>单张 2</td><td><code>[48]</code></td><td><code>[0, 12, 1, 0]</code></td></tr>
+<tr><td>对子 Q</td><td><code>[36, 37]</code></td><td><code>[1, 9, 2, 0]</code></td></tr>
+<tr><td>连对 7788</td><td><code>[16,17,20,21]</code></td><td><code>[2, 5, 2, 0]</code></td></tr>
+<tr><td>三带二 555+3+4</td><td><code>[0,4,8,9,10]</code></td><td><code>[4, 2, 5, 0]</code></td></tr>
+<tr><td>顺子 3-4-5-6-7</td><td><code>[0,4,8,12,16]</code></td><td><code>[7, 4, 5, 0]</code></td></tr>
+<tr><td>炸弹 5555</td><td><code>[8,9,10,11]</code></td><td><code>[8, 2, 4, 1]</code></td></tr>
+</tbody></table>
+<h3 id="h8">2.4 出牌历史 <code>history</code>（无状态接口用；整局对局由服务端自己维护）</h3>
+<pre><code>
+[
+  {"seat": 0, "move": [0]},
+  {"seat": 1, "move": [36, 37]},
+  {"seat": 0, "move": [], "pass_on": [1, 9, 2, 0]}
+]
+</code></pre>
+<ul>
+<li><code>seat</code>：<b>相对座位</b>，<code>0</code> = 提问方，<code>1</code> = 对手</li>
+</ul>
+<ul>
+<li><code>move</code>：牌 id 数组；<code>[]</code> = 过牌</li>
+</ul>
+<ul>
+<li><code>pass_on</code>：过牌时被"过"掉的牌型（建议填写，用于对手手牌推断）</li>
+</ul>
+<ul>
+<li>必须是<b>从开局第一手开始的完整历史</b></li>
+</ul>
+<h3 id="h9">2.5 规则变体 <code>opts</code></h3>
+<pre><code>
+{"red10": true, "four3": false, "nobomb": true, "sanzhang": false}
+</code></pre>
+<table><thead><tr><th>键</th><th>默认</th><th>含义</th></tr></thead><tbody>
+<tr><td><code>red10</code></td><td><code>false</code></td><td>红桃 10 翻倍（拿到 ♥10 的一方输赢 ×2）</td></tr>
+<tr><td><code>four3</code></td><td><code>false</code></td><td>允许"四带三"（4 张 + 任意 3 张）</td></tr>
+<tr><td><code>nobomb</code></td><td><code>true</code></td><td>炸弹不可拆开当其他牌型打出</td></tr>
+<tr><td><code>sanzhang</code></td><td><code>false</code></td><td>三张不可接（三张/三带一仅末手，且不能管三带二）</td></tr>
+</tbody></table>
+<blockquote><p>请让 <code>opts</code> 与你实际使用的规则一致，否则 AI 会按错误规则决策；整局对局里同一个 <code>gid</code> 的规则在开局时固定。</p></blockquote>
+<hr>
+<h2 id="h10">3. 接口</h2>
+<h3 id="h11">3.0 <code>GET /v1/health</code> — 探活与版本（免 Key）</h3>
+<pre><code>
+{
+  "ok": true,
+  "agent": "prod",
+  "productionModel": "ckpt/policy_a2c_final56.pt",
+  "modes": ["dual", "hybrid"],
+  "netProbe": {"net": "a2c-final56(56x)", "error": null},
+  "productionConfig": {"openingSearch": true, "openingWorlds": 16,
+                       "totalThreshold": 28, "openingBudget": 1.5},
+  "pdkCommit": {"hash": "9cf7a7a", "date": "2026-09-15", "subject": "开局搜索: 时间预算可配置 + 置信度画像"},
+  "public": true, "sessions": 0, "maxSessions": 64,
+  "endpoints": ["/api/analyze", "/api/decide", "/api/decode", "/api/explain",
+                "/api/new_game", "/api/play", "/api/state", "/api/suggest", "/health"]
+}
+</code></pre>
+<blockquote><p>建议：上线时把 <code>pdkCommit.hash</code> 记入你的日志，便于对账"当时用的是哪版模型"。</p></blockquote>
+<hr>
+<h3 id="h12">3.1 <code>POST /v1/new_game</code> — 开新局（整局对局）</h3>
+<p><b>请求</b></p>
+<pre><code>
+{"opts": {"red10": true}, "mode": "hybrid"}
+</code></pre>
+<table><thead><tr><th>字段</th><th>必填</th><th>说明</th></tr></thead><tbody>
+<tr><td><code>opts</code></td><td>⬜</td><td>规则变体（见 §2.5），默认 = 生产默认规则</td></tr>
+<tr><td><code>mode</code></td><td>⬜</td><td><code>hybrid</code>（默认，<b>胜率优先</b>）/ <code>dual</code>（<b>净分优先</b>，按得分估值）</td></tr>
+</tbody></table>
+<p><b>响应</b>（字段与后续 <code>/v1/play</code>、<code>/v1/state</code> 完全一致）</p>
+<pre><code>
+{
+  "gid": "81658db5598f4953a866be4a",
+  "you_are": 0,
+  "ai_seat": 1,
+  "turn": 0,
+  "finished": false,
+  "winner": null,
+  "my_hand": [0,1,12,15,20,22,23,32,34,35,37,38,39,40,46,48],
+  "my_n": 16,
+  "opp_n": 11,
+  "trick": [4, 2, 5, 0],
+  "trick_text": "三带二5",
+  "last_moves": [{"seat": 1, "cards": [8,9,10,0,4]}],
+  "legal": [[20,21,22], [8,9,10,0,4], []],
+  "legal_pass": false,
+  "scores": [0, 0],
+  "mode": "hybrid",
+  "opts": {"red10": true},
+  "moves": 1,
+  "new": true
+}
+</code></pre>
+<table><thead><tr><th>字段</th><th>含义</th></tr></thead><tbody>
+<tr><td><code>gid</code></td><td>本局会话 id（后续所有调用都用它）；<b>空闲 2 小时回收</b></td></tr>
+<tr><td><code>you_are</code> / <code>ai_seat</code></td><td>你固定坐 <code>0</code>，AI 坐 <code>1</code></td></tr>
+<tr><td><code>turn</code> / <code>finished</code> / <code>winner</code></td><td>当前该谁出（返回时恒为 <code>0</code>）、是否终局、赢家座位</td></tr>
+<tr><td><code>my_hand</code> / <code>my_n</code> / <code>opp_n</code></td><td>你的手牌与双方剩余张数</td></tr>
+<tr><td><code>trick</code> / <code>trick_text</code></td><td>台上要压的牌型（<code>null</code> = 你是领出方）</td></tr>
+<tr><td><code>last_moves</code></td><td>最近 6 手（含双方），便于展示</td></tr>
+<tr><td><code>legal</code></td><td><b>你的全部合法出法</b>（牌 id 数组的数组）；<code>[]</code> 出现时表示可以过牌</td></tr>
+<tr><td><code>legal_pass</code></td><td>是否允许过牌</td></tr>
+<tr><td><code>scores</code></td><td>比分（<code>finished=true</code> 时有效；底分 1 分/张、炸弹 10 分/颗、红桃 10 与关门翻倍）</td></tr>
+<tr><td><code>moves</code></td><td>本局已进行的手数</td></tr>
+</tbody></table>
+<p><b>耗时参考</b>：0.3–1.6 秒（若 AI 先手，包含它的开局决策）。</p>
+<hr>
+<h3 id="h13">3.2 <code>POST /v1/play</code> — 你出一手，AI 立即应手</h3>
+<p><b>请求</b></p>
+<pre><code>
+{"gid": "81658db5598f4953a866be4a", "cards": [20, 21]}
+</code></pre>
+<ul>
+<li><code>cards=[]</code> 表示过牌（仅当 <code>legal_pass=true</code> 时合法）</li>
+</ul>
+<ul>
+<li><b>响应</b>：与 §3.1 完全相同的快照；返回时 <code>turn</code> 必为 <code>0</code>（或 <code>finished=true</code>）</li>
+</ul>
+<p><b>关键语义：幂等续打。</b> 若上一次调用在 AI 应手中途失败（网络中断、服务瞬时错误），<b>原样重发同一个请求</b>即可继续——此时轮次已在 AI 侧，服务只补完 AI 的应手，不会重复落下你那一手。</p>
+<ul>
+<li>非法出牌 → <code>400</code>；不是你的回合 → <code>409</code></li>
+</ul>
+<ul>
+<li>终局后再调用 → 返回同一份终局快照（<code>200</code>）</li>
+</ul>
+<ul>
+<li><b>耗时参考</b>：0.2–2.5 秒（残局枚举求解偏慢）</li>
+</ul>
+<hr>
+<h3 id="h14">3.3 <code>GET /v1/state?gid=...</code> — 查询局面（只读）</h3>
+<p>返回与 §3.1 相同的快照，不会推进对局。适合断线重连、页面刷新、对账。</p>
+<hr>
+<h3 id="h15">3.4 <code>POST /v1/suggest</code> — 让 AI 给"当前出牌方"一手建议</h3>
+<p>可用来做"AI 帮我这一手"，也可以做"AI 托管整局"（把返回的 <code>cards</code> 交给 <code>/v1/play</code>）。</p>
+<p><b>请求</b>：<code>{"gid": "81658db5...", "explain": true}</code></p>
+<pre><code>
+{
+  "cards": [36, 37],
+  "pass": false,
+  "seat": 0,
+  "mode": "hybrid",
+  "legal_count": 33,
+  "explain": {
+    "path": "pimc_c",
+    "text": "对子QQ",
+    "reason": "在 32 个采样世界里求解, 对子QQ 的胜率最高 (62%)。 次优: 对子KK 55%",
+    "cands": [{"move": 268435456, "text": "对子QQ", "win_prob": 0.62},
+              {"move": 335544320, "text": "对子KK", "win_prob": 0.55}]
+  }
+}
+</code></pre>
+<ul>
+<li><code>cards=[]</code> + <code>pass=true</code> 表示建议过牌（此时 <code>legal_pass</code> 必为 <code>true</code>）</li>
+</ul>
+<ul>
+<li>本局已结束时返回 <code>{"cards": null, "reason": "本局已结束"}</code></li>
+</ul>
+<hr>
+<h3 id="h16">3.5 <code>POST /v1/decide</code> — 无状态单步决策（自己实现牌局时用）</h3>
+<p>给一个局面快照，返回 AI 的选择；<code>explain=true</code> 时附中文依据。</p>
+<p><b>请求</b></p>
+<pre><code>
+{
+  "my_hand": [0,4,8,12,16,20,24,28,32,36,40,44,45,46,48,5],
+  "opp_n": 16,
+  "trick": null,
+  "history": [],
+  "opts": {"red10": true},
+  "explain": true,
+  "mode": "hybrid"
+}
+</code></pre>
+<p><b>响应</b></p>
+<pre><code>
+{
+  "move": [4, 8, 12, 16, 20, 24, 28, 32, 36, 40],
+  "pass": false,
+  "legal_count": 1080,
+  "mode": "hybrid",
+  "engine": "c",
+  "openingSearch": true,
+  "explain": {
+    "path": "opening_search",
+    "text": "顺子 4+5+6+7+8+9+X+J+Q+K",
+    "reason": "在 16 个采样世界里求解, 顺子 4+5+6+7+8+9+X+J+Q+K 的胜率最高 (100%)。…",
+    "cands": [{"move": 123, "text": "…", "win_prob": 1.0}],
+    "belief": {"source": "读牌网络", "facts": ["对手高置信至少 2 张A"]},
+    "worlds": 16
+  }
+}
+</code></pre>
+<p><code>explain.path</code> 取值与含义：</p>
+<table><thead><tr><th>path</th><th>含义</th></tr></thead><tbody>
+<tr><td><code>opening_search</code></td><td>开局搜索（多世界 rollout）</td></tr>
+<tr><td><code>pimc_c</code> / <code>pimc_cn</code></td><td>残局精确求解（定胜负 / 按净分）</td></tr>
+<tr><td><code>endgame_order</code></td><td>残局连续保权</td></tr>
+<tr><td><code>report_dump</code></td><td>对手报单时保出牌权</td></tr>
+<tr><td><code>one_shot</code></td><td>一手直接走完</td></tr>
+<tr><td><code>lookahead</code></td><td>前瞻搜索（价值网 2-ply）</td></tr>
+<tr><td><code>fallback_net</code></td><td>策略网络直接估值（局面较大、未启用残局求解）</td></tr>
+<tr><td><code>forced</code></td><td>只有唯一合法手</td></tr>
+</tbody></table>
+<hr>
+<h3 id="h17">3.6 <code>POST /v1/explain</code> — 解释整局里的某一手（复盘用）</h3>
+<pre><code>
+请求 {"initial_hands": [[16张],[16张]], "first_player": 0, "ai_seat": 1,
+      "opts": {"red10": true}, "moves": [code 或 牌id数组...], "ply": 7}
+响应 {"ply": 7, "seat": 1, "text": "三带二 6+7+8+JJJJ", "path": "pimc_c",
+      "reason": "在 32 个采样世界里求解, …胜率最高 (62%)。",
+      "cands": [...], "state_text": "我剩 16 张, 对手剩 16 张; 我是领出方",
+      "recorded": "三带二 6+7+8+JJJJ", "decided": "三带二 6+7+8+JJJJ",
+      "anchored_back": false, "note": "…"}
+</code></pre>
+<ul>
+<li><code>ply</code> 从 1 开始；不传 = 最后一手；若指向的不是 AI 决策点，会自动回退到 AI 最近一次决策并置 <code>anchored_back: true</code></li>
+</ul>
+<ul>
+<li>该接口会<b>让 AI 重算它自己的每一手</b>，<code>decided</code>（重算）可能与 <code>recorded</code>（牌谱）不同（残局搜索带世界采样，属正常波动）</li>
+</ul>
+<h3 id="h18">3.7 <code>POST /v1/analyze</code> — 单步分析（真实局面下 AI 会怎么打）</h3>
+<p>给一手（AI 手或人类手皆可），返回"按真实牌谱的局面，AI 会怎么打 + 为什么"。</p>
+<pre><code>
+请求 {"initial_hands": [[16张],[16张]], "first_player": 0, "opts": {},
+      "moves": [[0], [36,37], []], "ply": 3}
+响应 {"ply": 3, "seat": 0, "state_text": "我剩 15 张, 对手剩 15 张; 台上: 单张6",
+      "recorded": {"cards": [18], "patText": "单张7", "pass": false},
+      "decided":  {"cards": [20], "patText": "单张8", "pass": false},
+      "agree": false,
+      "explain": {"path": "fallback_net", "reason": "…", "cands": []},
+      "note": "此处双方合计 30 张，超过 28 张阈值：未启用残局精确求解…"}
+</code></pre>
+<p><code>agree=false</code> 的点即"AI 认为有更好选择"的位置，配合 <code>explain.reason</code> 可直接产出复盘结论。</p>
+<h3 id="h19">3.8 <code>POST /v1/decode</code> — 牌谱解码</h3>
+<p>把动作码序列还原成"每一手谁出的、具体哪些牌、牌型、出后剩几张"。座位由内核判定（过牌后同一人继续领出，不能按奇偶交替推断）。</p>
+<pre><code>
+请求 {"initial_hands": [[16张],[16张]], "first_player": 0, "opts": {}, "moves": [1, 268435456, 0]}
+响应 {"moves": [
+  {"ply": 1, "seat": 0, "cards": [0], "pass": false, "pass_on": null,
+   "combo": {"ptype":0,"main":0,"len":1,"nc":0}, "handAfter": 15, "patText": "单张3"},
+  {"ply": 2, "seat": 1, "cards": [36,37], "pass": false, "pass_on": null,
+   "combo": {"ptype":1,"main":9,"len":2,"nc":0}, "handAfter": 15, "patText": "对子Q"},
+  {"ply": 3, "seat": 0, "cards": [], "pass": true, "pass_on": [1,9,2,0],
+   "combo": null, "handAfter": 15, "patText": "不出"}
+]}
+</code></pre>
+<hr>
+<h2 id="h20">4. 最佳实践</h2>
+<ol>
+<li><b>顺序调用</b>：并发上限 1，请勿对同一个 <code>gid</code> 并发调用；需要多局并行请与服务方沟通配额。</li>
+</ol>
+<ol>
+<li><b>重试策略</b>：<code>429</code> 按 <code>Retry-After</code> 退避；<code>502/503</code> 指数退避（1s/2s/4s）并<b>原样重发同一请求</b>（<code>/v1/play</code> 幂等）；<code>400/401/403/404/409</code> 不要重试（先修正）。</li>
+</ol>
+<ol>
+<li><b>会话过期</b>：<code>gid</code> 空闲 2 小时回收，过期返回 <code>404</code>，重新 <code>/v1/new_game</code> 即可；长期展示建议自行保存 <code>last_moves</code>。</li>
+</ol>
+<ol>
+<li><b>决策带随机性</b>：残局 PIMC 与开局搜索含世界采样，同一局面多次调用可能给出不同但同样合理的选择（设计特性，用于覆盖不确定性）。</li>
+</ol>
+<ol>
+<li><b>保留版本信息</b>：把 <code>/v1/health</code> 的 <code>pdkCommit.hash</code> 记入日志；内核版本更新会滚动生效，<code>/v1/*</code> 契约向后兼容。</li>
+</ol>
+<ol>
+<li><b>不要高频轮询</b> <code>/v1/state</code>：整局对局的每次 <code>/v1/play</code> 已返回完整快照，<code>/v1/state</code> 只用于断线恢复。</li>
+</ol>
+<ol>
+<li><b>上线自检</b>：<code>GET /v1/health</code> 应返回 <code>netProbe.net = "a2c-final56(56x)"</code>；用 §2.3 的测试向量核对你的牌型实现。</li>
+</ol>
+<hr>
+<h2 id="h21">5. 版本与兼容</h2>
+<ul>
+<li>路径版本 <code>/v1</code>；破坏性变更会另开 <code>/v2</code>，<code>v1</code> 至少保留 3 个月。</li>
+</ul>
+<ul>
+<li>响应<b>只增字段不删字段</b>，请忽略未知字段。</li>
+</ul>
+<ul>
+<li>决策行为会随内核版本迭代（这是"始终用最新最强模型"的代价）；需要冻结版本请与服务方约定。</li>
+</ul>
+<hr>
+<h2 id="h22">附录 A：规则要点（服务假设的规则）</h2>
+<ol>
+<li>牌库 48 张 = 去掉大小王、三张 2（♥2 ♣2 ♦2）、一张 A；<b>黑桃 2 保留且为全场最大单张</b></li>
+</ol>
+<ol>
+<li>发牌：随机弃 16 张底牌，双方各 16 张；持黑桃 3 者先出（在底牌则随机）</li>
+</ol>
+<ol>
+<li>牌型：单张、对子、连对（≥2 对）、三张、三带二、三带一、飞机、顺子（≥5 张且不含 2）、炸弹（4 张同点）、四带三（变体）</li>
+</ol>
+<ol>
+<li><b>有牌必打</b>：能压必须压；确实压不上时才可过牌</li>
+</ol>
+<ol>
+<li>炸弹可压任意牌型；炸弹之间比点数；炸弹不可拆（<code>nombomb</code>）</li>
+</ol>
+<ol>
+<li>三张 / 三带一仅最后一手（<code>sanzhang</code> 变体下更严：不能管三带二）</li>
+</ol>
+<ol>
+<li>计分：底分 1 分/张，按输家剩余张数计；对家一张未出（关门）翻倍；炸弹每颗 10 分；红桃 10 翻倍（可选）</li>
+</ol>
+<ol>
+<li>顺子中不能出现 2；A 只作大牌</li>
+</ol>
+<h2 id="h23">附录 B：curl 示例</h2>
+<pre><code>
+KEY="pdk_live_xxxx"
+BASE="https://chinesetestsite.com/pdk-ai/v1"
+
+# 探活（免 Key）
+curl -s "$BASE/health" | python3 -m json.tool
+
+# 开新局
+curl -s -X POST "$BASE/new_game" -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+     -d '{"opts":{"red10":true}}' | python3 -m json.tool
+
+# 出一手（把 &lt;GID&gt;/&lt;CARDS&gt; 换成上一步返回的值）
+curl -s -X POST "$BASE/play" -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+     -d '{"gid":"&lt;GID&gt;","cards":[20,21]}' | python3 -m json.tool
+
+# 单步决策 + 解释
+curl -s -X POST "$BASE/decide" -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+     -d '{"my_hand":[0,4,8,12,16,20,24,28,32,36,40,44,45,46,48,5],"opp_n":16,"trick":null,"history":[],"explain":true}' \
+     | python3 -m json.tool
+</code></pre>
+<h2 id="h24">附录 C：联调清单</h2>
+<table><thead><tr><th>#</th><th>事项</th><th>说明</th></tr></thead><tbody>
+<tr><td>1</td><td>拿到 API Key</td><td>服务方单独提供；请勿提交到公开仓库/前端代码</td></tr>
+<tr><td>2</td><td>出口 IP</td><td>若你的服务器出口 IP 固定，告知服务方加入白名单（可显著降低 Key 泄露风险）</td></tr>
+<tr><td>3</td><td>预计调用量</td><td>整局对局一局约 20–40 次调用；若需提高速率/并发/日配额，提前沟通</td></tr>
+<tr><td>4</td><td>联调验收</td><td>用 §0 的示例跑通一局；用 §2.3 测试向量核对牌型；<code>/v1/health</code> 确认 <code>netProbe.net</code></td></tr>
+<tr><td>5</td><td>异常路径</td><td>验证 <code>401</code>（无 Key）、<code>404</code>（过期 gid）、<code>429</code>（超限）与重试逻辑</td></tr>
+<tr><td>6</td><td>问题反馈</td><td>提供 <code>gid</code>、时间点、请求与响应原文，便于服务方在审计日志中定位</td></tr>
+</tbody></table>
+<hr>
+<p><b>服务方联系方式</b>：&lt;在此填写你的联系人 / 邮箱 / IM&gt;（Key 与配额调整也走这里）</p></main>
+</div></body></html>
