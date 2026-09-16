@@ -482,6 +482,30 @@ button { font-family: inherit; }
            vertical-align: 1px; white-space: nowrap; }
 .bf-pill.low { background: #ffce7a; }
 /* 张数分布行（"几张"）与最可能的一手牌 */
+/* “几张 × 什么牌”分组视图 */
+/* 候选整手：一行一手，可读的“几张什么牌”卡片 */
+.bf-hand { display: flex; align-items: center; gap: 6px; margin: 5px 0; }
+.bf-hand .k { flex-shrink: 0; width: 16px; font-size: 12px; color: #a9c9b5; }
+.bf-hand .chips { flex: 1; display: flex; flex-wrap: wrap; gap: 4px; }
+.bf-hand .v { flex-shrink: 0; width: 52px; text-align: right; font-size: 12px; color: #d8ecff;
+              font-variant-numeric: tabular-nums; }
+.bf-grp { display: flex; align-items: flex-start; gap: 8px; margin: 6px 0; }
+.bf-grp .lb { flex-shrink: 0; width: 46px; font-size: 13px; color: #ffe9b8; padding-top: 3px; }
+.bf-grp .lb b.off { color: #8fa79a; font-weight: 600; }
+.bf-grp .chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.bf-chip2 { display: inline-flex; align-items: baseline; gap: 3px; padding: 3px 8px;
+            border-radius: 8px; font-size: 14px; font-weight: 800; color: #fff3d6;
+            background: rgba(255,216,142,.15); border: 1px solid rgba(255,216,142,.42); }
+.bf-chip2 em { font-style: normal; font-size: 10.5px; font-weight: 600; color: #a9c9b5; }
+.bf-chip2.off { background: rgba(255,255,255,.05); border-color: rgba(255,255,255,.14); color: #93ac9d; }
+.bf-chip2.off em { color: #7d9487; }
+.bf-grp.off { opacity: .8; }
+.bf-sub { margin-top: 8px; border-top: 1px dashed rgba(255,255,255,.12); padding-top: 6px; }
+.bf-sub > summary { cursor: pointer; font-size: 12.5px; color: #9fc7e8; list-style: none; min-height: 32px;
+                    display: flex; align-items: center; }
+.bf-sub > summary::-webkit-details-marker { display: none; }
+.bf-subbody { margin-top: 4px; }
+.bf-cnt .rk { display: inline-block; width: 18px; font-weight: 800; color: #ffe9b8; }
 .bf-cnt { display: flex; flex-wrap: wrap; gap: 4px 8px; margin: -1px 0 6px 30px;
           font-size: 11.5px; color: #93ac9d; }
 .bf-cnt span { white-space: nowrap; }

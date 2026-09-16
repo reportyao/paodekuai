@@ -2474,43 +2474,97 @@ function bfCountLine(d, r) {
     '</div>';
 }
 /* 最可能的一手牌（opp_most_likely = 权重最高那一手的点数→张数） */
-function bfMostLikelyHTML(d) {
-  const ml = d.opp_most_likely || {};
-  const ks = Object.keys(ml).sort((a, b) => BF_RANK_ORDER.indexOf(a) - BF_RANK_ORDER.indexOf(b));
-  if (!ks.length) return '';
-  const txt = ks.map(k => '<b>' + bfEsc(k) + '</b>×' + ml[k]).join(' · ');
-  const p = Number((((d.top_hands || [])[0]) || {}).p || 0);
-  const tail = p >= 0.005
-    ? '（这一种的概率 ' + (p * 100).toFixed(1) + '%，共 ' + bfNum(d.worlds || 0) + ' 种可能）'
-    : '（单种概率很低属正常：可能构成 ' + bfNum(d.worlds || 0) + ' 种）';
-  return '<p class="bf-most">🎯 最可能的一手牌：' + txt + '<span class="dim">' + tail + '</span></p>';
+
+
+/* 把一手牌渲染成可读的"几张什么牌"卡片：{K:2,8:1,7:1} -> K×2 · 8 · 7 */
+function bfHandChips(ranks, dim) {
+  const ks = Object.keys(ranks || {}).sort((a, b) =>
+    (ranks[b] - ranks[a]) || (BF_RANK_ORDER.indexOf(a) - BF_RANK_ORDER.indexOf(b)));
+  if (!ks.length) return '<span class="dim">（空）</span>';
+  return '<span class="chips">' + ks.map(k =>
+    '<span class="bf-chip2' + (dim ? ' off' : '') + '">' + bfEsc(k) +
+    (ranks[k] > 1 ? '<em>×' + ranks[k] + '</em>' : '') + '</span>').join('') + '</span>';
 }
 
 function bfSecProb(d, who, seat) {
-  const rp = d.rank_prob || {}, re = d.rank_exp || {};
-  const rows = bfRanksByProb(d).filter(r => (rp[r] || 0) > 0.0005).map(r => {
-    const p = rp[r] || 0;
-    return '<div class="bf-row" title="P(≥1张) ' + (p * 100).toFixed(1) + '% · 期望 ' +
-      Number(re[r] || 0).toFixed(2) + ' 张">' +
-      '<span class="k">' + bfEsc(r) + '</span>' +
-      '<span class="bf-bar"><i style="width:' + Math.max(2, Math.round(p * 100)) + '%"></i></span>' +
-      '<span class="v">' + (p * 100).toFixed(1) + '%</span></div>' + bfCountLine(d, r);
+  const cp = d.rank_cnt_p || {}, rp = d.rank_prob || {};
+  const modeOf = r => {
+    const dist = cp[r];
+    if (!dist) return null;
+    let best = null;
+    Object.keys(dist).forEach(k => {
+      const v = +dist[k];
+      if (!best || v > best.p || (v === best.p && +k > best.k)) best = { k: +k, p: v };
+    });
+    return best;
+  };
+  const entries = BF_RANK_ORDER.map(r => ({ r, m: modeOf(r) }))
+    .filter(x => x.m || (rp[x.r] || 0) > 0.0005);
+  const distText = r => Object.keys(cp[r] || {}).sort((a, b) => +a - +b)
+    .map(k => (k === '0' ? '没有' : k + ' 张') + ' ' + Math.round(cp[r][k] * 100) + '%').join(' · ');
+  // ① 最可能的几手：直接回答"有几张什么牌"（按概率排序）
+  const hands = (d.top_hands || []).slice()
+    .sort((a, b) => Number(b.p || 0) - Number(a.p || 0)).slice(0, 6);
+  const pMax = Number((hands[0] || {}).p || 0);
+  const tops = hands.map((h, i) => {
+    const p = Number(h.p || 0);
+    return '<div class="bf-hand"><span class="k">' + (i + 1) + '</span>' +
+      bfHandChips(h.ranks || {}) +
+      '<span class="v">' + (p >= 0.001 ? (p * 100).toFixed(2) + '%' : '&lt;0.1%') + '</span></div>';
   }).join('');
-  const tops = (d.top_hands || []).slice()
-    .sort((a, b) => Number(b.p || 0) - Number(a.p || 0)).slice(0, 6).map((h, i) => {
-      const p = Number(h.p || 0);
-      return '<div class="bf-row"><span class="k">' + (i + 1) + '</span>' +
-        '<span class="cards" style="flex:1;font-family:Georgia,serif;letter-spacing:1px;color:#ffe9b8">' +
-        bfEsc(h.cards || '') + '</span>' +
-        '<span class="v">' + bfPct(p) + '</span></div>';
-    }).join('');
+  const topsTitle = pMax >= 0.005
+    ? '最可能的几手（按概率排序，读作"几张什么牌"）'
+    : '最可能的几手（按概率排序；开局信息少，单种概率天然很低，看下面的点数张数更实在）';
+  // ② 点数张数：只列"他较可能拿着"的点数（P(≥1) >= 25%），按张数分组；
+  // 其余点数一行带过 —— 否则每人天然众数=0，会堆成一长串"没有"，看着像废话。
+  const TH = 0.25;
+  // 这一块只回答"他若拿着，多半几张"：条件众数（在 k>=1 内取最大），组头 = 张数，
+  // chip 上的百分数 = 他持有该点数的概率 P(>=1)。这样不会再出现"较可能拿着"里写"没有"的矛盾。
+  const likely = entries.filter(x => (rp[x.r] || 0) >= TH).map(x => {
+    const dist = cp[x.r] || {};
+    let best = null;
+    Object.keys(dist).forEach(k => {
+      const kk = +k;
+      if (kk < 1) return;
+      const cpk = +dist[k] / Math.max(1e-9, rp[x.r]);
+      if (!best || cpk > best.cp || (cpk === best.cp && kk > best.k)) best = { k: kk, cp: cpk, raw: +dist[k] };
+    });
+    return { r: x.r, k: best ? best.k : 1, cp: best ? best.cp : 0, raw: best ? best.raw : 0,
+             p: rp[x.r] || 0, dist };
+  });
+  const rest = entries.filter(x => (rp[x.r] || 0) < TH)
+    .sort((a, b) => (rp[b.r] || 0) - (rp[a.r] || 0));
+  const byCount = {};
+  likely.forEach(x => { (byCount[x.k] = byCount[x.k] || []).push(x); });
+  const chip = x => '<span class="bf-chip2" title="' +
+    bfEsc('持有概率 ' + (x.p * 100).toFixed(1) + '%；若持有，最可能 ' + x.k + ' 张（' +
+          (x.cp * 100).toFixed(0) + '%，即 ' + (x.raw * 100).toFixed(1) + '%）' +
+          '；完整分布：' + (distText(x.r) || '—')) + '">' + bfEsc(x.r) +
+    '<em>' + Math.round(x.p * 100) + '%</em></span>';
+  const restLine = rest.length
+    ? '<p class="bf-note" style="margin-top:6px">其余 ' + rest.length + ' 个点数他大概率都没有' +
+      '（最高 ' + ((rp[rest[0].r] || 0) * 100).toFixed(0) + '%：' +
+      rest.slice(0, 6).map(x => bfEsc(x.r)).join(' ') + '…）</p>'
+    : '';
+  const lines = Object.keys(byCount).map(Number).sort((a, b) => b - a).map(k => {
+    const items = byCount[k].sort((a, b) => (b.p - a.p)).map(chip).join('');
+    return '<div class="bf-grp"><span class="lb"><b>' + k + ' 张</b></span>' +
+      '<span class="chips">' + items + '</span></div>';
+  }).join('');
+  // ③ 明细：每个点数的完整张数分布（默认收起）
+  const detail = entries.slice().sort((a, b) => BF_RANK_ORDER.indexOf(a.r) - BF_RANK_ORDER.indexOf(b.r))
+    .map(x => '<div class="bf-cnt"><span class="rk">' + bfEsc(x.r) + '</span>' +
+      bfEsc(distText(x.r) || '信息不足') + '</div>').join('');
   return '<details class="bf-sec" open><summary>🃏 ' + who + '大概是什么' +
     '<span class="tag">' + (d.opp_n != null ? '对手剩 ' + d.opp_n + ' 张' : '') + '</span>' +
     '<span class="chev">▶</span></summary><div class="bf-inner">' +
-    '<p class="bf-note">点数概率 = 对手持有该点数 ≥1 张的比例（<b>已按概率从高到低排序</b>）；' +
-    '每行下方是<b>张数分布</b>（没有 / 1 张 / 2 张…各多少概率，众数加粗）。</p>' + bfMostLikelyHTML(d) +
-    (rows || '<p class="bf-note">暂无（信息不足或对手已无牌）</p>') +
-    (tops ? '<p class="bf-note" style="margin-top:10px">最可能的构成（概率降序）</p>' + tops : '') +
+    (tops ? '<p class="bf-note">' + topsTitle + '</p>' + tops : '') +
+    '<p class="bf-note" style="margin-top:10px"><b>点数张数</b>：只列他有<b>可能拿着</b>的点数' +
+    '（持有概率 ≥25%）；组头 = 他若拿着最可能几张，chip 小字 = 他持有该点数的概率。' +
+    '张数多的组在前（"2 张/3 张"就是可能成对/成三的点数）。</p>' +
+    (lines || '<p class="bf-note">暂无——他对每个点数都不太可能有牌（信息太散）。</p>') + restLine +
+    '<details class="bf-sub"><summary>📋 每个点数的完整张数分布（0/1/2/3/4 各多少概率）</summary>' +
+    '<div class="bf-subbody">' + detail + '</div></details>' +
     '</div></details>';
 }
 
