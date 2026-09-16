@@ -152,13 +152,27 @@ def load_games(prefix_filter: str | None = None) -> list[dict]:
             d["api"] = True
             d.setdefault("caller", "API 调用方(未标注)")
         out.append(d)
-    return sorted(out, key=lambda d: d["_epoch"], reverse=True)
+    # 排序键必须确定：早期只用 ts（秒级），同一秒创建的两局会并列 -> 顺序随 glob 抖动，
+    # 复盘"按编号找局"就会随机取到其中一局（线上重号 A1179 那次就取错了局）。
+    return sorted(out, key=lambda d: (d["_epoch"], d["_mtime"], d["_file"]), reverse=True)
 
 
-def find_by_id(gid: str) -> dict | None:
-    gid = gid.strip().upper()
-    for d in load_games():
-        if str(d.get("no", "")).upper() == gid or d["_file"] == gid:
+def find_by_id(gid: str, sid: str = "") -> dict | None:
+    """按编号或文件名(sid)定位对局。
+
+    sid 优先且精确：历史数据里存在"一个编号对应两局"（编号分配竞态遗留），
+    此时只按编号找会选到其中一局（不保证是当前这局）——复盘就会和真实出牌对不上。
+    前端在复盘"当局/上局"时会带上会话 sid，从而锁定唯一那一局。
+    """
+    gid = (gid or "").strip().upper()
+    sid = (sid or "").strip().lower()
+    games = load_games()
+    if sid:
+        for d in games:
+            if str(d.get("_file", "")).lower() == sid + ".json" or                str(d.get("sid", "")).lower() == sid:
+                return d
+    for d in games:
+        if str(d.get("no", "")).upper() == gid or d["_file"].upper() == gid:
             return d
     return None
 

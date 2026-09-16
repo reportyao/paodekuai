@@ -421,10 +421,30 @@ def cleanup_stale_live(hours: float = 2.0):
             continue
 
 
+_NO_USED: set = set()          # 本进程已发出的编号（含尚未落盘的）
+
+
+def note_no_used(no: str):
+    """登记编号（恢复会话复用旧号时也要登记，避免新局重复发出）。"""
+    if no:
+        with _NO_LOCK:
+            _NO_USED.add(str(no))
+
+
 def allocate_no(prefix: str = "A") -> str:
-    """分配对局编号（进程内加锁，避免并发会话撞号）。"""
+    """分配对局编号。
+
+    只看目录扫描是不够的：编号在会话创建时分配、文件在之后才写出来，
+    两个会话在同一秒创建时（多设备/多标签同时开局）后一个扫不到前一个的文件，
+    会把同一个号发两次 —— 线上实测出现过两个 A1179，导致"复盘当局"按号找文件找错局。
+    因此叠加进程内"已发出"集合，保证同进程内绝不复用；跨进程靠不同前缀/目录隔离。
+    """
     with _NO_LOCK:
-        return next_replay_no(REPLAY_DIR, prefix)
+        no = next_replay_no(REPLAY_DIR, prefix)
+        while no in _NO_USED:
+            no = f"{prefix}{int(no[len(prefix):]) + 1:04d}"
+        _NO_USED.add(no)
+        return no
 
 
 def write_replay(s: Shadow, live: bool):
@@ -2128,6 +2148,7 @@ def _restore_sessions_inner() -> int:
                     s._apply(code)
             finally:
                 s.restoring = False
+            note_no_used(s.no)                       # 旧号登记，避免新局重复发出
             if s.game.finished:
                 write_replay(s, live=False)          # 恢复时才发现已结束 -> 补写终局
                 continue

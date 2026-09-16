@@ -148,6 +148,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "live": bool(d.get("live")),
                         "source": d.get("source", "ai_bridge"),
                         "caller": d.get("caller") or ("API 调用方" if is_api else ""),
+                        # 定位字段：复盘按"编号或 sid"打开时用（历史上有编号撞号的数据，
+                        # 只有编号无法区分是哪一局，必须能拿到会话号）
+                        "sid": str(d.get("sid", "")),
+                        "file": d.get("_file", ""),
                         "duration": d.get("durationSec"),
                         "scope": "api" if is_api else "mine",
                     })
@@ -177,7 +181,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                                    for g in games[:20]]}
             if u.path == "/replays/get":
                 no = (q.get("no") or [""])[0]
-                d = replay_report.find_by_id(no)
+                sid = (q.get("sid") or q.get("file") or [""])[0]      # 可选：精确锁定会话（重号时必需）
+                d = replay_report.find_by_id(no, sid)
                 if not d:
                     return {"error": f"找不到对局 {no}"}
                 game = {k: v for k, v in d.items() if not k.startswith("_")}

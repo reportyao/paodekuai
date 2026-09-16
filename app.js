@@ -1477,13 +1477,18 @@ async function showReplayHistory(scope) {
         (HS_SCOPE === 'api' ? '还没有外部调用方的对局（对方通过 API 打完一局后会出现在这里）。' : '暂无对局记录。') + '</div>';
       return;
     }
-    box.innerHTML = games.map(g => `<div class="res-line rv-row" data-no="${g.no}">
-        <span class="rv-no">${g.no}</span>
-        <span class="v">${g.time} ｜ ${g.kind} ｜ ${g.participants} ｜ ${g.moves}手 ｜ ${g.result}</span>
+    // 同一编号出现多次（历史编号撞号遗留）时，追加会话短号以便区分，并在复盘时精确锁定
+    const dupCount = {};
+    games.forEach(g => { dupCount[g.no] = (dupCount[g.no] || 0) + 1; });
+    box.innerHTML = games.map(g => `<div class="res-line rv-row" data-no="${g.no}" data-sid="${g.sid || g.file || ''}">
+        <span class="rv-no">${g.no}${dupCount[g.no] > 1 && (g.sid || g.file) ? `<em class="rv-sid">·${String(g.sid || g.file).slice(0, 4)}</em>` : ''}</span>
+        <span class="v">${g.time} ｜ ${g.kind} ｜ ${g.participants} ｜ ${g.moves}手 ｜ ${g.result}${
+          dupCount[g.no] > 1 ? '' : ''}</span>
         <span class="rv-badge${g.comments ? '' : ' hidden'}">✍️${g.comments}</span>
         <button class="btn ghost small">复盘</button>
       </div>`).join('');
-    box.querySelectorAll('.rv-row').forEach(el => el.addEventListener('click', () => openReview(el.dataset.no)));
+    box.querySelectorAll('.rv-row').forEach(el =>
+      el.addEventListener('click', () => openReview(el.dataset.no, el.dataset.sid)));
   } catch (e) {
     loadReplayArchive();
     box.innerHTML = S.replayArchive.length
@@ -1505,11 +1510,13 @@ async function exportAllReplays() {
 }
 
 /* ---- 逐手复盘查看器 ---- */
-async function openReview(no) {
+async function openReview(no, sid) {
   $('rv-move').textContent = '加载中…';
   $('review-modal').classList.remove('hidden');
   let data;
-  try { data = await fetch('/replays/get?no=' + encodeURIComponent(no)).then(x => x.json()); }
+  // sid 用于精确锁定会话：历史数据里有"一编号两局"，只按编号会打开另一局（与真实出牌对不上）
+  const q = '/replays/get?no=' + encodeURIComponent(no) + (sid ? '&sid=' + encodeURIComponent(sid) : '');
+  try { data = await fetch(q).then(x => x.json()); }
   catch { toast('复盘加载失败'); return; }
   if (!data || !data.game) { toast((data && data.error) || '复盘加载失败'); return; }
   const g = data.game;
@@ -1629,7 +1636,7 @@ async function reviewCurrentGame() {
     return;
   }
   RV.from = 'game';
-  await openReview(bridge.no);
+  await openReview(bridge.no, bridge.sid);          // 带 sid：同号时锁定"本局"这个会话
   // 默认定位到最新一手，方便就当前局面写点评
   if (RV.total > 0) { RV.step = RV.total; renderReview(); }
   const sel = $('rv-comment-ply');
@@ -1639,17 +1646,17 @@ async function reviewCurrentGame() {
 
 async function reviewPreviousGame() {
   RV.from = 'game';
-  let no = S.prevRoundNo || null;
+  let no = S.prevRoundNo || null, sid = S.prevRoundSid || null;
   if (!no) {
     // 没打过上一局 -> 取最近一局已结束的对局
     try {
       const r = await fetch('/replays/list').then(x => x.json());
       const done = (r.games || []).filter(g => !g.live && g.no !== S.currentNo);
-      if (done.length) no = done[0].no;
+      if (done.length) { no = done[0].no; sid = done[0]._file; }
     } catch {}
   }
   if (!no) { toast('还没有可复盘的上一局'); return; }
-  await openReview(no);
+  await openReview(no, sid);
   if (RV.total > 0) { RV.step = RV.total; renderReview(); }
   const sel = $('rv-comment-ply');
   if (sel && RV.total > 0) sel.value = String(RV.total);
@@ -1728,6 +1735,7 @@ function settle(winner) {
 }
 function endRound(winner) {
   S.prevRoundNo = S.currentNo || null;      // 本局结束 -> 成为“上一局”
+  S.prevRoundSid = bridge.sid || null;      // 连同会话号记下：同号时"复盘上局"才打得准
   S.currentNo = null;
   S.phase = 'roundEnd';
   clearTimeout(S.aiTimer);

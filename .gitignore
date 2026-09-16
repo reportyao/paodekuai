@@ -13,3 +13,5 @@ t.py
 t2.py
 _upload/
 _bak/
+# 网关 API Key（含密钥，绝不入库）
+_keys/

@@ -393,6 +393,7 @@ button { font-family: inherit; }
 .st-ok { color: #7ee0a8; font-weight: 700; }
 .st-bad { color: #ffb35c; font-weight: 700; }
 .hs-stats b { color: #ffd88e; }
+.rv-no em.rv-sid { font-style: normal; font-size: 11px; color: #9fc7e8; opacity: .85; }
 .rv-explain .rv-diff { color: #ffb35c; }
 .explain-loading { color: #9fc7e8; font-size: 12px; }
 @media (max-width: 760px) {
