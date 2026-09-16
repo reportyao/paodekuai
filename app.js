@@ -2406,48 +2406,66 @@ function bfRender(d) {
 }
 
 /* ① 对手手牌概率：top_hands + rank_prob */
+/* 概率排序（用户要求：不要固定 2>A>K… 顺序）：
+ * 以"对手持有该点数的概率"降序为准；概率先取整到 1%，避免每手微小波动让格子乱跳；
+ * 同概率时未见张数多的优先，最后按传统点数大小稳定收尾。 */
+function bfRanksByProb(d, led) {
+  const rp = d.rank_prob || {};
+  const bucket = r => Math.round((Number(rp[r]) || 0) * 100);
+  const seen = r => (led ? Number(led[r] || 0) : 0);
+  return BF_RANK_ORDER.slice().sort((a, b) =>
+    (bucket(b) - bucket(a)) ||
+    (seen(b) - seen(a)) ||
+    (BF_RANK_ORDER.indexOf(a) - BF_RANK_ORDER.indexOf(b)));
+}
+
 function bfSecProb(d, who, seat) {
   const rp = d.rank_prob || {}, re = d.rank_exp || {};
-  const rows = BF_RANK_ORDER.filter(r => (rp[r] || 0) > 0.0005).map(r => {
+  const rows = bfRanksByProb(d).filter(r => (rp[r] || 0) > 0.0005).map(r => {
     const p = rp[r] || 0;
     return '<div class="bf-row" title="期望 ' + Number(re[r] || 0).toFixed(2) + ' 张">' +
       '<span class="k">' + bfEsc(r) + '</span>' +
       '<span class="bf-bar"><i style="width:' + Math.max(2, Math.round(p * 100)) + '%"></i></span>' +
       '<span class="v">' + (p * 100).toFixed(1) + '%</span></div>';
   }).join('');
-  const tops = (d.top_hands || []).slice(0, 6).map((h, i) => {
-    const p = Number(h.p || 0);
-    return '<div class="bf-row"><span class="k">' + (i + 1) + '</span>' +
-      '<span class="cards" style="flex:1;font-family:Georgia,serif;letter-spacing:1px;color:#ffe9b8">' +
-      bfEsc(h.cards || '') + '</span>' +
-      '<span class="v">' + bfPct(p) + '</span></div>';
-  }).join('');
+  const tops = (d.top_hands || []).slice()
+    .sort((a, b) => Number(b.p || 0) - Number(a.p || 0)).slice(0, 6).map((h, i) => {
+      const p = Number(h.p || 0);
+      return '<div class="bf-row"><span class="k">' + (i + 1) + '</span>' +
+        '<span class="cards" style="flex:1;font-family:Georgia,serif;letter-spacing:1px;color:#ffe9b8">' +
+        bfEsc(h.cards || '') + '</span>' +
+        '<span class="v">' + bfPct(p) + '</span></div>';
+    }).join('');
   return '<details class="bf-sec" open><summary>🃏 ' + who + '大概是什么' +
     '<span class="tag">' + (d.opp_n != null ? '对手剩 ' + d.opp_n + ' 张' : '') + '</span>' +
     '<span class="chev">▶</span></summary><div class="bf-inner">' +
-    '<p class="bf-note">点数概率 = 在所有与公开信息一致的可能手牌里，对手持有该点数 ≥1 张的比例（越高越可能）。' +
-    '下面是权重最高的几种具体构成。</p>' + (rows || '<p class="bf-note">暂无（信息不足或对手已无牌）</p>') +
-    (tops ? '<p class="bf-note" style="margin-top:10px">最可能的构成</p>' + tops : '') +
+    '<p class="bf-note">点数概率 = 在所有与公开信息一致的可能手牌里，对手持有该点数 ≥1 张的比例。' +
+    '<b>已按概率从高到低排序</b>（最可能在最上面）；下面是概率最高的几种具体构成。</p>' +
+    (rows || '<p class="bf-note">暂无（信息不足或对手已无牌）</p>') +
+    (tops ? '<p class="bf-note" style="margin-top:10px">最可能的构成（概率降序）</p>' + tops : '') +
     '</div></details>';
 }
 
 /* ② 记牌台账：各点数还没露面的张数 */
 function bfSecLedger(d, seat) {
-  const led = d.ledger || {};
-  const cells = BF_RANK_ORDER.map(r => {
+  const led = d.ledger || {}, rp = d.rank_prob || {};
+  const cells = bfRanksByProb(d, led).map(r => {      // 同样概率降序（已断张自动沉底）
     const n = Number(led[r] || 0);
     const cap = BF_COPIES[r] || 4;
+    const p = Number(rp[r] || 0);
     let dots = '';
     for (let i = 0; i < cap; i++) dots += '<i class="' + (i < n ? 'on' : '') + '"></i>';
-    return '<div class="bf-cell' + (n === 0 ? ' zero' : '') + '"><div class="r">' +
-      bfEsc(r) + '</div><div class="n">' + n + '/' + cap + '</div>' +
-      '<div class="dots">' + dots + '</div></div>';
+    return '<div class="bf-cell' + (n === 0 ? ' zero' : '') + '">' +
+      '<div class="r">' + bfEsc(r) + '</div><div class="n">' + n + '/' + cap + '</div>' +
+      '<div class="dots">' + dots + '</div>' +
+      (p > 0.0005 ? '<div class="p">' + Math.round(p * 100) + '%</div>' : '') + '</div>';
   }).join('');
   const total = Object.values(led).reduce((a, b) => a + Number(b || 0), 0);
   return '<details class="bf-sec" open><summary>🧮 记牌台账' +
     '<span class="tag">未见 ' + total + ' 张</span><span class="chev">▶</span></summary>' +
-    '<div class="bf-inner"><p class="bf-note">各点数“还没露面”的张数（牌堆总量 − 我手牌 − 双方已出）。' +
-    '点亮的圆点 = 还剩几张。' + seat + '视角下这就是' + (BF.persp === 'me' ? 'AI' : '你') + '还能拿到的牌池。</p>' +
+    '<div class="bf-inner"><p class="bf-note">各点数“还没露面”的张数（牌堆总量 − 我手牌 − 双方已出），' +
+    '点亮的圆点 = 还剩几张。<b>格子按概率从高到低排</b>：下方百分比 = 对手持有该点数的概率；' +
+    '已经断掉的点数（0/N）自动沉到最后。</p>' +
     '<div class="bf-grid">' + cells + '</div></div></details>';
 }
 

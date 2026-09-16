@@ -469,6 +469,8 @@ button { font-family: inherit; }
 .bf-cell .dots i { width: 5px; height: 5px; border-radius: 50%; background: rgba(255,255,255,.18); }
 .bf-cell .dots i.on { background: #7ed0a8; }
 .bf-cell.zero { opacity: .45; }
+.bf-cell .p { font-size: 10px; color: #8fd0ff; margin-top: 2px; line-height: 1.1; }
+.bf-cell.zero .p { display: none; }
 .bf-fact { display: flex; gap: 8px; align-items: flex-start; padding: 7px 0;
            border-top: 1px dashed rgba(255,255,255,.12); font-size: 13px; line-height: 1.6;
            color: #e6f2ea; }
