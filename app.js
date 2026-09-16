@@ -487,11 +487,34 @@ async function bridgeApi(path, body, timeoutMs = 15000) {
       body: body !== undefined ? JSON.stringify(body === null ? {} : body) : undefined,
       signal: ctl.signal,
     });
-    const j = await r.json();
+    bridge.lastStatus = r.status;
+    const txt = await r.text();
+    if (!txt) {                                     // 空响应（链路抖动/服务重启时会这样）
+      if (!r.ok) {
+        const err = new Error('AI 服务返回空响应（HTTP ' + r.status + '），请重试');
+        err.status = r.status; err.transport = true; err.rid = rid;
+        throw err;
+      }
+      return {};
+    }
+    let j = null;
+    try { j = JSON.parse(txt); }
+    catch (_) {                                     // 非 JSON：不要把原始解析错误抛给用户
+      const err = new Error('AI 服务响应异常（HTTP ' + r.status + '，链路抖动/服务重启时会出现），请重试');
+      err.status = r.status; err.transport = true; err.rid = rid;
+      throw err;
+    }
     if (j && j.rid) bridge.lastRid = j.rid;         // 服务端回显的 rid（与本地一致即链路对得上）
     return j;
   } catch (e) {
-    bridge.lastRid = rid;                           // 失败也保留，便于报障
+    bridge.lastRid = (e && e.rid) || rid;           // 失败也保留，便于报障
+    if (e && e.name === 'AbortError') {
+      e.transport = true; e.timedOut = true;
+      e.message = 'AI 正在算牌（超过 ' + Math.round(timeoutMs / 1000) + 's 未回），稍后再点一次';
+    } else if (e instanceof TypeError) {
+      e.transport = true;                           // fetch 网络层错误
+      e.message = 'AI 服务连不上（网络中断或被重置），请重试';
+    }
     throw e;
   } finally { clearTimeout(tm); }
 }
@@ -2281,14 +2304,28 @@ function bfStatelessPayload() {
 }
 
 async function bfCall(persp) {
-  const post = (body) => bridgeApi('/api/belief', body, 30000);
+  const post = (body) => bridgeApi('/api/belief', body, 12000);   // 正常 <1s；超时=AI 在算牌，不要拖 30s
+  const build = () => {
+    if (S.mode === 'ai') return { sid: bridge.sid, perspective: persp };
+    return bfStatelessPayload().payload;            // 热座：按当前局面重建（重试时状态可能已变）
+  };
   if (S.mode === 'ai') {
     for (let i = 0; i < 40 && bridge.initing; i++) await new Promise(r => setTimeout(r, 200));
     if (!bridge.ready || !bridge.sid) throw new Error(bridge.lastErr || 'AI 服务未就绪（深度模型会话未建立）');
-    return await post({ sid: bridge.sid, perspective: persp });
   }
-  const { payload } = bfStatelessPayload();
-  return await post(payload);
+  // 链路抖动（空响应/非 JSON/5xx/超时）自动重试 1 次；语义错误（400 等）不重试
+  let last = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try { return await post(build()); }
+    catch (e) {
+      last = e;
+      // 只重试"空响应/非 JSON/5xx"这类链路抖动；超时说明 AI 正在算牌，重试也是白等
+      const retryable = (e && !e.timedOut && (e.transport || (e.status >= 500)));
+      if (!retryable || attempt === 1) throw e;
+      await new Promise(r => setTimeout(r, 1200));
+    }
+  }
+  throw last;
 }
 
 function bfOpen() {

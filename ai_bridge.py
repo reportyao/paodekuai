@@ -787,6 +787,8 @@ BELIEF_LOCK_MAX_WORLDS = _env_int("PDK_BELIEF_LOCK_MAX") or 8000      # lock.vs_
 BELIEF_LEADS_MAX_WORLDS = _env_int("PDK_BELIEF_LEADS_MAX") or 1200    # lock.leads 候选认证的世界数上限
 BELIEF_LEADS_MAX_CANDS = _env_int("PDK_BELIEF_LEADS_CANDS") or 24     # 最多认证多少个合法领出候选
 BELIEF_LOCK_DEADLINE = float(_env_int("PDK_BELIEF_LOCK_MS") or 1500) / 1000.0   # 认证总预算（秒）
+BELIEF_LOCK_WAIT = float(_env_int("PDK_BELIEF_LOCK_WAIT_MS") or 2500) / 1000.0   # 会话锁等待上限（AI 决策中要快速返回）
+BELIEF_SEM = threading.Semaphore(2)          # 记牌猜牌独立闸：不与"AI 决策"共用排队（否则会排在长决策后面）
 
 
 def _belief_core(payload: dict, cfg) -> dict:
@@ -986,23 +988,36 @@ def do_belief(p: dict):
     if p.get("sid"):
         sid = check_ident(p.get("sid"), "sid")
         s = get_sess(sid)
-        with s.lock:
-            if s.bad:
-                return {"error": "影子牌局已失效", "type": "ShadowBad"}, 500
+        if s.bad:
+            return {"error": "影子牌局已失效", "type": "ShadowBad"}, 500
+        # 只在锁内做"快照"（毫秒级），计算放到锁外：AI 决策期间锁被长时间持有，
+        # 若整个计算都塞在锁内，前端会一直转圈（实测 >8s 无响应）。
+        if not s.lock.acquire(timeout=BELIEF_LOCK_WAIT):
+            raise Busy(f"AI 正在算这一手（决策中），记牌猜牌稍后再看（已等 {BELIEF_LOCK_WAIT:.1f}s）")
+        try:
             persp = str(p.get("perspective") or "ai")
             payload = _session_belief_payload(s, persp)
-            with decide_gate():
-                out = _belief_core(payload, s.cfg)
-            out["view"] = {"perspective": persp,
-                           "my_seat": 1 if persp == "ai" else 0,
-                           "ply": len(s.moves_detail),
-                           "turn": int(s.cg.g.turn),
-                           "my_n": len(payload["my_hand"]),
-                           "opp_n": payload["opp_n"]}
-            return out, 200
+            view = {"perspective": persp,
+                    "my_seat": 1 if persp == "ai" else 0,
+                    "ply": len(s.moves_detail),
+                    "turn": int(s.cg.g.turn)}
+        finally:
+            s.lock.release()
+        if not BELIEF_SEM.acquire(timeout=6):
+            raise Busy("记牌猜牌排队中，请稍后重试")
+        try:
+            out = _belief_core(payload, s.cfg)
+        finally:
+            BELIEF_SEM.release()
+        out["view"] = dict(view, my_n=len(payload["my_hand"]), opp_n=payload["opp_n"])
+        return out, 200
     cfg = build_cfg(p.get("opts") or {})
-    with decide_gate():
+    if not BELIEF_SEM.acquire(timeout=6):
+        raise Busy("记牌猜牌排队中，请稍后重试")
+    try:
         out = _belief_core(p, cfg)
+    finally:
+        BELIEF_SEM.release()
     return out, 200
 
 
