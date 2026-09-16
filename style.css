@@ -481,6 +481,16 @@ button { font-family: inherit; }
            padding: 1px 7px; margin-left: 4px; color: #10261a; background: #7ed0a8;
            vertical-align: 1px; white-space: nowrap; }
 .bf-pill.low { background: #ffce7a; }
+/* 张数分布行（"几张"）与最可能的一手牌 */
+.bf-cnt { display: flex; flex-wrap: wrap; gap: 4px 8px; margin: -1px 0 6px 30px;
+          font-size: 11.5px; color: #93ac9d; }
+.bf-cnt span { white-space: nowrap; }
+.bf-cnt span.on { color: #ffe9b8; font-weight: 800; }
+.bf-most { margin: 0 0 8px; padding: 7px 10px; font-size: 13px; line-height: 1.6;
+           color: #ffe9b8; background: rgba(255,216,142,.09);
+           border: 1px solid rgba(255,216,142,.28); border-radius: 9px; }
+.bf-most b { color: #fff3d6; }
+.bf-most .dim { color: #a9c9b5; font-size: 11.5px; }
 .bf-pill.rule { background: rgba(255,255,255,.16); color: #cfe6d8; }
 .bf-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
 .bf-chip { font-family: Georgia, serif; font-size: 14px; letter-spacing: 1px;

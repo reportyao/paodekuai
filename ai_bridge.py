@@ -854,14 +854,30 @@ def _belief_core(payload: dict, cfg) -> dict:
     if z <= 0:
         z = 1.0
     rank_prob, rank_exp = {}, {}
+    rp_flag = None
     if len(rows):
         m1 = (rows >= 1)
         rp = (m1 * w[:, None]).sum(axis=0) / z
         re_ = (rows * w[:, None]).sum(axis=0) / z
+        rp_flag = rp
         for r in range(N_RANKS):
             if rp[r] > 1e-6 or re_[r] > 1e-6:
                 rank_prob[bot_server.RANK_TXT[r]] = round(float(rp[r]), 4)
                 rank_exp[bot_server.RANK_TXT[r]] = round(float(re_[r]), 3)
+    # 逐点数"张数分布" P(对手该点数恰有 k 张), k=0..4（上游 8325d96 新增）：
+    # 光有"有没有"(rank_prob) 不够，用户要"到底几张"。门控与阈值与上游一致。
+    rank_cnt_p = {}
+    if rp_flag is not None:
+        for r in range(N_RANKS):
+            if not (rp_flag[r] > 1e-6):
+                continue
+            dist = {}
+            for k in range(0, 5):
+                share = float(w[rows[:, r] == k].sum()) / z
+                if share > 0.005:
+                    dist[int(k)] = round(share, 4)
+            if dist:
+                rank_cnt_p[bot_server.RANK_TXT[r]] = dist
     order = np.argsort(-w)[:8] if len(rows) else []
     top_hands = []
     for i in order:
@@ -942,6 +958,8 @@ def _belief_core(payload: dict, cfg) -> dict:
         "ledger": ledger,
         "rank_prob": rank_prob,
         "rank_exp": rank_exp,
+        "rank_cnt_p": rank_cnt_p,        # 张数分布: P(恰有 k 张), k=0..4
+        "opp_most_likely": (top_hands[0]["ranks"] if top_hands else {}),   # 最可能的一手牌（点数->张数）
         "top_hands": top_hands,
         "facts": facts,
         "lock": lock,

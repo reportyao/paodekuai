@@ -274,6 +274,24 @@ check("belief.facts 为 {kind,text} 结构", all(isinstance(f, dict) and f.get("
       for f in (b.get("facts") or [])), (b.get("facts") or [])[:1])
 check("belief.lock 结构含 leads", isinstance(b.get("lock"), dict) and "leads" in b["lock"],
       str(b.get("lock"))[:120])
+# 张数分布 / 最可能的一手牌（上游 8325d96 新增：回答"到底几张"）
+cp = b.get("rank_cnt_p") or {}
+check("belief.rank_cnt_p 结构（点数->{k:概率}）",
+      bool(cp) and all(isinstance(v, dict) and all(str(k).isdigit() for k in v)
+                       for v in cp.values()), str(cp)[:110])
+check("belief.rank_cnt_p 每点数概率和<=1",
+      all(sum(float(x) for x in v.values()) <= 1.001 for v in cp.values()),
+      {k: round(sum(float(x) for x in v.values()), 3) for k, v in list(cp.items())[:3]})
+_rp = b.get("rank_prob") or {}
+check("belief.rank_cnt_p 与 rank_prob 自洽（P(>=1) ≥ 1-P(0)）",
+      all(abs(1.0 - float(v.get("0", 0))) <= float(_rp.get(k, 0)) + 0.02
+          for k, v in cp.items() if k in _rp), str(cp)[:80])
+ml = b.get("opp_most_likely") or {}
+check("belief.opp_most_likely 为点数->张数",
+      bool(ml) and all(int(v) >= 1 for v in ml.values()), str(ml)[:110])
+check("belief.opp_most_likely 与 top_hands[0] 一致",
+      (not (b.get("top_hands") or [])) or ml == (b["top_hands"][0].get("ranks") or {}),
+      f'{ml} vs {(b.get("top_hands") or [{}])[0].get("ranks")}')
 check("belief 概率与期望自洽（rank_prob >= rank_exp/4）",
       all(float((b.get("rank_prob") or {}).get(k, 0)) + 1e-6 >= float(v) / 4.0
           for k, v in (b.get("rank_exp") or {}).items()), b.get("rank_exp"))

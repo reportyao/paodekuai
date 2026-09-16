@@ -2456,14 +2456,45 @@ function bfRanksByProb(d, led) {
     (BF_RANK_ORDER.indexOf(a) - BF_RANK_ORDER.indexOf(b)));
 }
 
+/* 张数分布（上游 8325d96 的 rank_cnt_p）：把"有没有"细化成"几张"。
+ * 只展示份额 >=2% 的档（或总共只有两档时全展示），众数加粗，避免手机上太碎。 */
+function bfCountLine(d, r) {
+  const cp = (d.rank_cnt_p || {})[r];
+  if (!cp) return '';
+  const items = Object.keys(cp).map(k => ({ k: +k, p: +cp[k] }))
+    .sort((a, b) => a.k - b.k)
+    .filter(x => x.p >= 0.02 || Object.keys(cp).length <= 2);
+  if (!items.length) return '';
+  const mode = items.reduce((a, b) => (b.p > a.p ? b : a));
+  const title = Object.keys(cp).sort((a, b) => +a - +b)
+    .map(k => (k === '0' ? '没有' : k + ' 张') + ' ' + Math.round(cp[k] * 1000) / 10 + '%').join('，');
+  return '<div class="bf-cnt" title="' + bfEsc(title) + '">' + items.map(x =>
+    '<span class="' + (x.k === mode.k ? 'on' : '') + '">' +
+    (x.k === 0 ? '没有' : x.k + '张') + ' ' + Math.round(x.p * 100) + '%</span>').join('') +
+    '</div>';
+}
+/* 最可能的一手牌（opp_most_likely = 权重最高那一手的点数→张数） */
+function bfMostLikelyHTML(d) {
+  const ml = d.opp_most_likely || {};
+  const ks = Object.keys(ml).sort((a, b) => BF_RANK_ORDER.indexOf(a) - BF_RANK_ORDER.indexOf(b));
+  if (!ks.length) return '';
+  const txt = ks.map(k => '<b>' + bfEsc(k) + '</b>×' + ml[k]).join(' · ');
+  const p = Number((((d.top_hands || [])[0]) || {}).p || 0);
+  const tail = p >= 0.005
+    ? '（这一种的概率 ' + (p * 100).toFixed(1) + '%，共 ' + bfNum(d.worlds || 0) + ' 种可能）'
+    : '（单种概率很低属正常：可能构成 ' + bfNum(d.worlds || 0) + ' 种）';
+  return '<p class="bf-most">🎯 最可能的一手牌：' + txt + '<span class="dim">' + tail + '</span></p>';
+}
+
 function bfSecProb(d, who, seat) {
   const rp = d.rank_prob || {}, re = d.rank_exp || {};
   const rows = bfRanksByProb(d).filter(r => (rp[r] || 0) > 0.0005).map(r => {
     const p = rp[r] || 0;
-    return '<div class="bf-row" title="期望 ' + Number(re[r] || 0).toFixed(2) + ' 张">' +
+    return '<div class="bf-row" title="P(≥1张) ' + (p * 100).toFixed(1) + '% · 期望 ' +
+      Number(re[r] || 0).toFixed(2) + ' 张">' +
       '<span class="k">' + bfEsc(r) + '</span>' +
       '<span class="bf-bar"><i style="width:' + Math.max(2, Math.round(p * 100)) + '%"></i></span>' +
-      '<span class="v">' + (p * 100).toFixed(1) + '%</span></div>';
+      '<span class="v">' + (p * 100).toFixed(1) + '%</span></div>' + bfCountLine(d, r);
   }).join('');
   const tops = (d.top_hands || []).slice()
     .sort((a, b) => Number(b.p || 0) - Number(a.p || 0)).slice(0, 6).map((h, i) => {
@@ -2476,8 +2507,8 @@ function bfSecProb(d, who, seat) {
   return '<details class="bf-sec" open><summary>🃏 ' + who + '大概是什么' +
     '<span class="tag">' + (d.opp_n != null ? '对手剩 ' + d.opp_n + ' 张' : '') + '</span>' +
     '<span class="chev">▶</span></summary><div class="bf-inner">' +
-    '<p class="bf-note">点数概率 = 在所有与公开信息一致的可能手牌里，对手持有该点数 ≥1 张的比例。' +
-    '<b>已按概率从高到低排序</b>（最可能在最上面）；下面是概率最高的几种具体构成。</p>' +
+    '<p class="bf-note">点数概率 = 对手持有该点数 ≥1 张的比例（<b>已按概率从高到低排序</b>）；' +
+    '每行下方是<b>张数分布</b>（没有 / 1 张 / 2 张…各多少概率，众数加粗）。</p>' + bfMostLikelyHTML(d) +
     (rows || '<p class="bf-note">暂无（信息不足或对手已无牌）</p>') +
     (tops ? '<p class="bf-note" style="margin-top:10px">最可能的构成（概率降序）</p>' + tops : '') +
     '</div></details>';

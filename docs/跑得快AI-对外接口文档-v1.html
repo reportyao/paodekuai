@@ -417,6 +417,8 @@ SUIT_CN = "♠♥♣♦"
   "ledger": {"3":1,"5":2,"6":3,"K":3,"A":2,"2":1},   // 记牌台账：各点数"未露面"张数
   "rank_prob": {"K":0.31,"A":0.12},                  // P(对手持有 &gt;=1 张该点数)
   "rank_exp": {"K":0.33,"A":0.12},                   // 该点数期望张数
+  "rank_cnt_p": {"K":{"0":0.69,"1":0.21,"2":0.10}},  // 张数分布 P(恰有 k 张), k=0..4（份额&lt;0.5% 的档不列）
+  "opp_most_likely": {"K":2,"8":1},                  // 最可能的一手牌（点数-&gt;张数，= top_hands[0].ranks）
   "top_hands": [{"cards":"44","ranks":{"4":2},"p":0.0198}],   // 最可能的若干构成
   "facts": [{"kind":"lead_rule1","text":"对手领对9: 通常没有对8/对X (实测命中 91%)"}],
   "lock": {"vs_trick": {"p_beat":0.0,"certified_locked":true},
@@ -429,8 +431,9 @@ SUIT_CN = "♠♥♣♦"
 <li><code>ledger</code> 是"记牌"：<code>总量 − 我的当前手牌 − 双方已出</code>，可直接做成台账 UI。</li>
 </ul>
 <ul>
-<li><code>rank_prob</code> / <code>rank_exp</code> / <code>top_hands</code> 是"猜牌"：对手手牌的点数分布与最可能构成。</li>
+<li><code>rank_prob</code>（有没有）/ <code>rank_cnt_p</code>（<b>各几张</b>）/ <code>rank_exp</code>（期望张数）/ <code>opp_most_likely</code>（最可能的一手牌）/ <code>top_hands</code>（前 N 种构成）是"猜牌"四件套：</li>
 </ul>
+<p><code>rank_prob</code> 只回答"是否持有"，<code>rank_cnt_p</code> 才回答"到底几张"（<code>{"K":{"0":0.69,"1":0.21,"2":0.10}}</code> 读作：69% 没有 K、21% 恰好 1 张、10% 恰好 2 张）；<code>opp_most_likely</code> 是最可能那一手的点数→张数。</p>
 <ul>
 <li><code>facts</code> 是<b>可解释推断链</b>，每条带实测命中率（<code>lead_rule1/2/3</code>=领出规则、<code>pass</code>=过牌硬约束、<code>gap</code>=断7/断10、<code>tell</code>=三带暗示被打破）。<code>kind</code> 便于分类展示。</li>
 </ul>
