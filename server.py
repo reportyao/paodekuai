@@ -127,9 +127,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         try:
             if u.path == "/replays/list":
                 scope = (q.get("scope") or ["mine"])[0]
+                show_all = (q.get("all") or ["0"])[0] in ("1", "true", "yes")   # all=1 时连未成局也列出来
                 cidx = replay_report.comments_index()
                 games = []
                 for d in replay_report.load_games():
+                    # 复盘只列"真正打完/正在进行"的局：空局（一手未打）与中途退出（无胜负）默认不出现，
+                    # 否则列表里全是没意义的碎片（历史遗留已清理到 data/_trash_*，此处防止再生）。
+                    if not show_all:
+                        _mv = len(d.get("moves") or d.get("codes") or [])
+                        if _mv == 0:
+                            continue
+                        if not d.get("live") and d.get("winner") is None:
+                            continue
                     is_api = bool(d.get("api") or d.get("_prefix") == "E")
                     if scope == "mine" and is_api:
                         continue
