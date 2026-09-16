@@ -2365,7 +2365,7 @@ function bfMetaHTML(d) {
 }
 function bfPct(p) {
   const v = Number(p || 0) * 100;
-  if (v > 0 && v < 0.01) return '&lt;0.01%';
+  if (v < 0.01) return '&lt;0.01%';          // 桥里 round(p,5) 会把极小概率舍成 0：一律按"小于 0.01%"如实显示
   return v.toFixed(2) + '%';
 }
 function bfNum(n) {
