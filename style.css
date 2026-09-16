@@ -368,6 +368,22 @@ button { font-family: inherit; }
 .rv-scope { display: flex; gap: 8px; margin: 6px 0 8px; }
 .rv-scope .btn.active { background: rgba(90, 190, 130, .22); border-color: rgba(120, 230, 170, .55); color: #d8ffe8; }
 .hs-stats { font-size: 12.5px; color: #cfe3d8; opacity: .92; margin: 0 0 10px; line-height: 1.7; }
+/* 置顶牌副选择 */
+.deck-field { margin-bottom: 4px; }
+.deck-field label { color: #ffd88e; font-weight: 700; }
+.decksz-row { display: flex; gap: 10px; margin-top: 6px; }
+.decksz { flex: 1; border: 1px solid rgba(255,255,255,.18); border-radius: 12px;
+          padding: 10px 12px; cursor: pointer; background: rgba(255,255,255,.05);
+          transition: all .15s; }
+.decksz:hover { border-color: rgba(255,216,142,.5); }
+.decksz.active { border-color: #ffd88e; background: rgba(255,216,142,.12);
+                 box-shadow: 0 0 0 1px #ffd88e inset; }
+.decksz-title { font-weight: 800; font-size: 15px; color: #ffd88e; }
+.decksz-desc { font-size: 12px; opacity: .8; margin-top: 3px; line-height: 1.5; }
+.deck-hint { margin-top: 8px; font-size: 12px; line-height: 1.7; opacity: .85;
+             background: rgba(255,216,142,.08); border: 1px solid rgba(255,216,142,.25);
+             border-radius: 8px; padding: 6px 10px; }
+.deck-hint.hidden { display: none; }
 .selftest-box { margin-top: 10px; font-size: 13px; line-height: 1.8; text-align: left;
                 background: rgba(0,0,0,.25); border: 1px solid rgba(255,255,255,.12);
                 border-radius: 10px; padding: 10px 14px; }

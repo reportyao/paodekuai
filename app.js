@@ -11,6 +11,7 @@ const BOMB_SCORE = 10;   // 每颗炸弹收取分数
 const S = {
   screen: 'lobby',
   mode: 'ai',                                  // 'ai' | 'hotseat'
+  deckSpec: 16,                                // 牌副规格：16（经典，深度AI）| 15（新玩法，简易AI）
   opts: { sanzhang: false, nobomb: true, red10: false, four3: false },
   rounds: 10, roundNo: 0,
   total: [0, 0], history: [],
@@ -53,6 +54,15 @@ function buildDeck() {
   d.push({ i: i++, r: 15, s: 0 });                                                    // 黑桃2，全场最大单张
   return d;                                                                           // 共48张
 }
+/* ===== 15张玩法（牌副规格置顶选择）=====
+ * 牌副 45 张 = 48张副再去掉 ♦A(id46)、♣A(id45) 和 ♦K(id43)
+ *（等价于"去三个2、三个A、一个K"：三个2只留黑桃2、A剩1张、K剩3张）
+ * 每局随机弃 15 张底牌，两家各 15 张；其余规则与 16 张完全一致。
+ */
+const DECK15_SKIP = new Set([43, 45, 46]);
+function buildDeck15() { return buildDeck().filter(c => !DECK15_SKIP.has(c.i)); }
+function deckSize() { return S.deckSpec === 15 ? 15 : 16; }
+function isDeck15() { return S.deckSpec === 15; }
 function sortHand(h) { h.sort((a, b) => b.r - a.r || a.s - b.s); return h; }
 function removeCards(hand, cards) { const ids = new Set(cards.map(c => c.i)); return hand.filter(c => !ids.has(c.i)); }
 function cardText(c) { return SUITS[c.s] + RANK_NAME[c.r]; }
@@ -711,6 +721,37 @@ function setBridgeMode(on) {
 let externalAI = null;                                   // (ctx) => cards|null，由 pdkRegisterAI 注册
 function pdkRegisterAI(fn) { externalAI = fn; }
 
+/* ===== 15张模式：内置简易 AI（贪心占位；深度模型接口见 aiMove 内 Pdk15AI.adapter）===== */
+function pdk15Greedy(ctx) {
+  const legal = (ctx.legal || []).slice();
+  if (!legal.length) return null;                          // 无解 -> 过牌
+  const isLead = !ctx.last;
+  // combo 结构（analyzeShape）：{t:'single'|'pair'|...字符串牌型, key:主点数, len:张数}
+  const val = m => {
+    const c = m.combo;
+    if (c.t === 'bomb') return 10000 + c.key;              // 炸弹尽量留着
+    return c.key * 10 + m.cards.length * 0.1;
+  };
+  // 一手走完直接赢
+  const done = legal.find(m => m.cards.length === ctx.hand.length);
+  if (done) return done.cards;
+  let pick;
+  if (isLead) {
+    // 领出：最小结构；对手只剩1张时领最大的单张（简单顶牌意识）
+    if (ctx.oppCount === 1) {
+      const singles = legal.filter(m => m.combo.t === 'single');
+      if (singles.length) pick = singles.reduce((a, b) => a.combo.key > b.combo.key ? a : b);
+    }
+    if (!pick) pick = legal.reduce((a, b) => val(a) <= val(b) ? a : b);
+  } else {
+    // 跟牌：取最小合法着法（有牌必打：只剩炸弹能管也必须管，与 UI/深度模型一致）
+    const nonBomb = legal.filter(m => m.combo.t !== 'bomb');
+    pick = (nonBomb.length ? nonBomb : legal).slice().sort((a, b) => val(a) - val(b))[0];
+    if (!pick) return null;
+  }
+  return pick.cards;
+}
+
 async function aiMove() {
   if (S.phase !== 'playing' || S.turn !== 1 || S.mode !== 'ai') return;
   const seat = 1;
@@ -724,7 +765,26 @@ async function aiMove() {
     opts: S.opts,
   };
   let cards = null;
-  if (typeof externalAI === 'function') {
+  if (isDeck15()) {
+    /* ===== 15张模式：AI 适配接口（预留）=====
+     * 深度模型接入时实现 Pdk15AI.adapter = { play(ctx) -> cards数组|[]（过牌）|null（无解） }，
+     * ctx 与 16 张 externalAI 相同（hand/last/legal/opts，全部为本地真实数据）。
+     * 当前 adapter 为空 -> 走内置简易 AI（贪心：能压取最小、领出取最小结构）。
+     */
+    const adapterRet = (window.Pdk15AI && typeof window.Pdk15AI.adapter === 'function')
+      ? await window.Pdk15AI.adapter(ctx) : null;
+    if (adapterRet === null) {
+      const mv = pdk15Greedy(ctx);
+      cards = mv;                                          // null=过牌（pdk15Greedy 已确认无解）
+    } else if (Array.isArray(adapterRet) && adapterRet.length === 0) {
+      // 有牌必打：本地与桥内一致，适配器不得在有合法着法时过牌
+      if (!ctx.legal || !ctx.legal.length) { applyPass(seat); return; }
+      console.warn('[Pdk15AI] 适配器在有合法着法时要求过牌，已改为最小合法着法');
+      cards = ctx.legal.slice().sort((a, b) => a.combo.key - b.combo.key)[0].cards;
+    } else if (Array.isArray(adapterRet)) {
+      cards = adapterRet;
+    }
+  } else if (typeof externalAI === 'function') {
     if (!bridge.ready && bridge.initHands) {
       const t0 = Date.now();
       while (!bridge.ready && Date.now() - t0 < 25000) {     // 等重建完成（跨海需数秒）
@@ -1014,7 +1074,7 @@ function renderOnline() {
   const waiting = S.phase === 'waiting';
   // 顶栏
   $('g-round').textContent = st.round || S.roundNo; $('g-rounds').textContent = st.rounds || S.rounds;
-  $('g-mode').textContent = '在线对战 · 房号 ' + ONLINE.code;
+  $('g-mode').textContent = (isDeck15() ? '15张玩法 · ' : '') + '在线对战 · 房号 ' + ONLINE.code;
   $('g-score').innerHTML = `${S.names[0]} <b>${S.total[0]}</b> : <b>${S.total[1]}</b> ${S.names[1]}`;
   // 对手座位
   $('opp-avatar').textContent = '🧑';
@@ -1069,6 +1129,7 @@ function renderOppArea(n, reveal) {
 /* ================= 流程 ================= */
 function startMatch() {
   S.mode = chosenMode;
+  if (S.deckSpec === 15 && chosenMode === 'online') { toast('15张模式暂不支持在线对战，已切回16张'); S.deckSpec = 16; syncDeckSpecUI(); }
   S.opts = {
     sanzhang: $('opt-sanzhang').checked,
     nobomb: $('opt-nobomb').checked,
@@ -1079,7 +1140,9 @@ function startMatch() {
   S.total = [0, 0]; S.history = []; S.roundNo = 0; S.lastWinner = null;
   if (S.mode === 'ai') { S.names = ['我', '电脑']; S.avatars = ['🙂', '🤖']; }
   else { S.names = ['玩家一', '玩家二']; S.avatars = ['🧑', '👦']; }
-  bridgeHealth().then(ok => {
+  if (isDeck15()) {
+    if (S.mode === 'ai') toast('🧪 15张模式：当前为内置简易 AI（深度模型待接入）', 3000);
+  } else bridgeHealth().then(ok => {
     if (S.mode === 'ai') toast(ok ? '🤖 已接入生产版 AI 机器人（hybrid / dual 双模式）'
                                    : '⛔ AI 服务未连接：对局将暂停并提示重试（不降级）', 3000);
   });
@@ -1092,9 +1155,11 @@ function nextRound() {
 }
 function startRound() {
   clearTimeout(S.aiTimer);
-  const deck = shuffle(buildDeck());
-  S.kitty = deck.slice(0, 16);
-  S.hands = [sortHand(deck.slice(16, 32)), sortHand(deck.slice(32, 48))];
+  const kittyN = isDeck15() ? 15 : 16;
+  const handN = kittyN;                                   // 两家各 = 底牌数（15/16）
+  const deck = shuffle(isDeck15() ? buildDeck15() : buildDeck());
+  S.kitty = deck.slice(0, kittyN);
+  S.hands = [sortHand(deck.slice(kittyN, kittyN + handN)), sortHand(deck.slice(kittyN + handN, kittyN + 2 * handN))];
   S.initialHands = [S.hands[0].slice(), S.hands[1].slice()];
   S.roundMoves = [];
   S.roundNo++;
@@ -1117,7 +1182,7 @@ function startRound() {
   } else leader = S.lastWinner;
   S.turn = leader;
   S.roundLeader = leader;
-  if (S.mode === 'ai') bridgeNewRound();           // 同步影子牌局给 AI 机器人
+  if (S.mode === 'ai' && !isDeck15()) bridgeNewRound();   // 16张：同步影子牌局给深度 AI（15张模式不接桥，接口预留）
   hideModal();
   beginTurn();
 }
@@ -1134,13 +1199,17 @@ function beginTurn() {
     render();
     if (S.mode === 'ai' && S.aiBlocked) return;           // 暂停中：不自动行动
     const startAI = () => {
+      if (S.mode === 'ai' && isDeck15()) {                // 15张：简易 AI（本地），不依赖桥
+        S.aiTimer = setTimeout(aiMove, 600 + randInt(500));
+        return;
+      }
       if (S.mode === 'ai' && !bridge.ready) {             // 不降级：桥不可用 -> 报错暂停
         aiError(bridge.lastErr || 'AI 服务未连接（生产模型不可用）');
         return;
       }
       S.aiTimer = setTimeout(aiMove, 600 + randInt(500));
     };
-    if (S.mode === 'ai' && bridge.initing) bridge.waiters.push(startAI);  // 等桥初始化完成，消除先手竞态
+    if (S.mode === 'ai' && !isDeck15() && bridge.initing) bridge.waiters.push(startAI);  // 等桥初始化完成，消除先手竞态
     else startAI();
   } else render();
 }
@@ -1183,7 +1252,7 @@ function applyPlay(seat, cards) {
   S.roundMoves.push({ seat, cards: cards.map(c => c.i), combo: { ...combo }, ts: Date.now() });
   if (seat === 1 && S.revealOpp && S.mode === 'ai') showOppExplain(S.roundMoves.length);   // 明牌：解释 AI 这手
   if (seat === 0) clearOppExplain();
-  if (S.mode === 'ai') bridgeMirror(seat, cards);             // 镜像出牌（历史必记）
+  if (S.mode === 'ai' && !isDeck15()) bridgeMirror(seat, cards);   // 镜像出牌（仅16张深度AI）
   if (hand.length === 1) toast('⚠ ' + S.names[seat] + ' 报单！只剩1张', 1800);
   if (msg) toast(msg, 1600);
   if (hand.length === 0) { S.lastWinner = seat; endRound(seat); return; }
@@ -1198,7 +1267,7 @@ function applyPass(seat) {
   S.selected = new Set(); S.hints = []; S.hintIdx = -1;
   S.roundMoves.push({ seat, cards: [], combo: null, pass: true,
     pass_on: passed ? comboToTrick(passed.combo) : null, ts: Date.now() });
-  if (S.mode === 'ai') bridgeMirror(seat, []);                // 镜像过牌
+  if (S.mode === 'ai' && !isDeck15()) bridgeMirror(seat, []);      // 镜像过牌（仅16张深度AI）
   S.turn = 1 - seat;
   if (seat === 1 && S.revealOpp && S.mode === 'ai') showOppExplain(S.roundMoves.length);  // 明牌：AI 为何不出
   if (seat === 0) clearOppExplain();
@@ -1317,7 +1386,7 @@ function analyzeHTML(r, o) {
 async function showOppExplain(ply) {
   const box = $('opp-explain');
   if (!box) return;
-  if (!(S.mode === 'ai' && S.revealOpp && bridge.ready && bridge.sid)) { box.classList.add('hidden'); return; }
+  if (!(S.mode === 'ai' && !isDeck15() && S.revealOpp && bridge.ready && bridge.sid)) { box.classList.add('hidden'); return; }
   box.classList.remove('hidden');
   box.innerHTML = '<span class="explain-loading">🤖 解析 AI 这手…</span>';
   try {
@@ -1752,7 +1821,7 @@ function render() {
   const opp = 1 - me;
   // 顶栏
   $('g-round').textContent = S.roundNo; $('g-rounds').textContent = S.rounds;
-  $('g-mode').textContent = S.mode === 'ai' ? '人机对战' : (S.mode === 'online' ? '在线对战' : '双人热座');
+  $('g-mode').textContent = (isDeck15() ? '15张 · ' : '') + (S.mode === 'ai' ? '人机对战' : (S.mode === 'online' ? '在线对战' : '双人热座'));
   const noEl = $('g-game-no');
   noEl.textContent = S.currentNo ? ('本局 ' + S.currentNo) : (S.prevRoundNo ? ('上局 ' + S.prevRoundNo) : '');
   noEl.classList.toggle('hidden', !S.currentNo && !S.prevRoundNo);
@@ -1934,6 +2003,11 @@ let chosenMode = 'ai';
 async function refreshAIVersion() {
   const el = $('ai-version');
   if (!el) return;
+  if (isDeck15()) {
+    el.classList.remove('warn');
+    el.innerHTML = '🧪 <b>15张玩法</b>：当前为内置简易 AI ｜ 深度模型接口已预留（Pdk15AI.adapter），待接入 ｜ 在线对战暂不支持';
+    return;
+  }
   try {
     const r = await bridgeApi('/health', undefined, 6000);
     if (!r || !r.ok) throw new Error('down');
@@ -1958,9 +2032,41 @@ async function refreshAIVersion() {
   }
 }
 
+/* 牌副规格（置顶选择）：15张=45张牌副新玩法；持久化到 localStorage */
+function syncDeckSpecUI() {
+  document.querySelectorAll('.decksz').forEach(el =>
+    el.classList.toggle('active', +el.dataset.deck === S.deckSpec));
+  $('deck15-hint').classList.toggle('hidden', S.deckSpec !== 15);
+  $('slogan-line').textContent = S.deckSpec === 15
+    ? '两人对战 · 45张牌副 · 各15张 · 黑桃2最大 · 黑桃3先出 · 有牌必打'
+    : '两人对战 · 48张牌 · 黑桃2最大 · 黑桃3先出 · 有牌必打';
+  $('btn-selftest').classList.toggle('hidden', S.deckSpec === 15);   // 自检修的是16张深度AI链路
+  document.querySelectorAll('.rev-btn').forEach(b =>
+    b.classList.toggle('hidden', S.deckSpec === 15));                // 服务端复盘仅覆盖16张局
+  refreshAIVersion();                                                // 版本行随牌副切换（15张显示"简易AI/接口预留"）
+}
+
 function initLobby() {
+  try { S.deckSpec = +localStorage.getItem('pdk_deck_spec') === 15 ? 15 : 16; } catch {}
+  syncDeckSpecUI();
+  document.querySelectorAll('.decksz').forEach(el => {
+    el.addEventListener('click', () => {
+      const was15 = S.deckSpec === 15;
+      S.deckSpec = +el.dataset.deck;
+      try { localStorage.setItem('pdk_deck_spec', String(S.deckSpec)); } catch {}
+      syncDeckSpecUI();
+      if (S.deckSpec === 15 && !was15 && chosenMode === 'online') {
+        toast('15张模式暂不支持在线对战，请选人机或热座', 2600);
+        document.querySelector('.mode[data-mode="ai"]').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      }
+    });
+  });
   document.querySelectorAll('.mode').forEach(el => {
     el.addEventListener('click', () => {
+      if (S.deckSpec === 15 && el.dataset.mode === 'online') {
+        toast('15张模式暂不支持在线对战（深度 AI 待接入），请选人机对战或双人热座', 3000);
+        return;
+      }
       document.querySelectorAll('.mode').forEach(x => x.classList.remove('active'));
       el.classList.add('active');
       chosenMode = el.dataset.mode;
@@ -2047,6 +2153,32 @@ async function showHint() {
     $('hint-text').textContent = txt;
     $('btn-adopt').classList.add('hidden');
   };
+  if (isDeck15()) {
+    // 15张模式：本地简易提示（不接桥；深度模型待接入）
+    const seatCtx = {
+      hand: S.hands[me].slice(), oppCount: S.hands[1 - me].length,
+      last: S.last ? S.last.combo : null, opts: S.opts,
+    };
+    seatCtx.legal = legalPlays(seatCtx.hand, seatCtx, S.opts);
+    const cards = pdk15Greedy(seatCtx);
+    src = '简易提示·15张';
+    if (!cards) {
+      $('btn-adopt').classList.add('hidden');           // 15张不接深度模型（接口预留 Pdk15AI.adapter）
+      $('hint-bar').classList.remove('hidden');
+      $('hint-text').innerHTML = '建议<b>[' + src + ']</b>：不出（当前无合法压制）';
+      return;
+    }
+    const combo = analyzeShape(cards);
+    S.hints = [{ cards, combo }]; S.hintIdx = 0;
+    S.selected = new Set(cards.map(c => c.i));
+    $('btn-adopt').classList.add('hidden');
+    const hb2 = $('hint-bar');
+    hb2.classList.remove('hidden');
+    $('hint-text').innerHTML = '建议<b>[' + src + ']</b> ' + comboName(combo) + '：<span class="hint-cards">' +
+      cards.map(c => cardText(c)).join(' ') + '</span>';
+    render();
+    return;
+  }
   if (S.mode === 'ai') {
     // 先手开局时桥可能仍在初始化（跨海约1~2秒）：等它完成再决策
     for (let i = 0; i < 60 && bridge.initing; i++) await new Promise(r => setTimeout(r, 200));
@@ -2062,14 +2194,17 @@ async function showHint() {
   }
   if (p && p.pass) {                                   // 深度建议：不出（当前被压且无解）
     S.selected = new Set(); S.hints = []; S.hintIdx = -1;
+    $('btn-adopt').classList.add('hidden');
+    render();                                          // render 会隐藏提示条（无 S.hints）-> 之后再显示文字
+    $('hint-bar').classList.remove('hidden');
     $('hint-text').innerHTML = '建议<b>[' + src + ']</b>：不出（当前无合法压制）';
-    render();
     return;
   }
   if (!p || p.error) {                                 // 不降级：直接报错，不提供内置建议
+    $('btn-adopt').classList.add('hidden');
+    S.selected = new Set(); render();                   // 同上：先 render 再显示报错，避免被隐藏
     $('hint-bar').classList.remove('hidden');
     $('hint-text').innerHTML = '<b>AI 提示不可用</b>：' + String((p && p.error) || '未返回建议').replace(/[<>]/g, '');
-    S.selected = new Set(); render();
     return;
   }
   S.hints = [p]; S.hintIdx = 0;
@@ -2098,8 +2233,9 @@ function quitToLobby() {
 function init() {
   loadReplayArchive();
   initLobby();
-  refreshAIVersion();
   onlineRestore();   // 刷新后恢复进行中的在线对局
+  if (S.screen === 'game' && S.mode === 'online') { S.deckSpec = 16; syncDeckSpecUI(); }  // 在线只支持48张副
+  refreshAIVersion();
   // AI 机器人回调：只走生产模型（不降级）。
   // 一致性：桥内落什么牌，网页就出什么牌（精确映射 + 全规则校验），保证影子牌局永不失步；
   // 任何异常 -> 抛出，由 aiMove 统一暂停并报错（绝不用内置 AI 代打）。
@@ -2152,7 +2288,8 @@ function init() {
   $('btn-reveal').addEventListener('click', () => {
     S.revealOpp = !S.revealOpp;
     render();
-    if (S.revealOpp && S.mode === 'ai' && S.roundMoves.length) {
+    if (S.revealOpp && isDeck15()) { toast('15张模式：仅明牌看牌，深度解释待模型接入', 2200); clearOppExplain(); }
+    else if (S.revealOpp && S.mode === 'ai' && S.roundMoves.length) {
       const last = S.roundMoves[S.roundMoves.length - 1];
       if (last.seat === 1) showOppExplain(S.roundMoves.length); else clearOppExplain();
     } else clearOppExplain();
