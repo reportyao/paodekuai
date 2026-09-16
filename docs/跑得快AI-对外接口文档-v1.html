@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>跑得快 AI 策略服务 · 接口文档 v1</title><style>
+<title>接口文档</title><style>
 :root { --fg:#1c2530; --dim:#5b6b7c; --line:#e3e8ee; --accent:#1f6feb;
         --code-bg:#f6f8fa; --callout:#fff8e6; --callout-line:#f0c14b; }
 * { box-sizing: border-box; }
@@ -42,7 +42,7 @@ li { margin:4px 0; }
                 .toc{page-break-after:always} h2{page-break-after:avoid} pre,table{page-break-inside:avoid} }
 </style></head>
 <body><div class="wrap">
-<nav class="toc"><b>目录</b><a href="#h0">0. 5 分钟跑通（推荐路径：整局对局）</a><a href="#h1">1. 接入信息</a><a href="#h4">2. 数据模型（全局约定）</a><a href="#h10">3. 接口</a><a href="#h20">4. 最佳实践</a><a href="#h21">5. 版本与兼容</a><a href="#h22">附录 A：规则要点（服务假设的规则）</a><a href="#h23">附录 B：curl 示例</a><a href="#h24">附录 C：联调清单</a></nav>
+<nav class="toc"><b>目录</b><a href="#h0">0. 5 分钟跑通（推荐路径：整局对局）</a><a href="#h1">1. 接入信息</a><a href="#h4">2. 数据模型（全局约定）</a><a href="#h10">3. 接口</a><a href="#h21">4. 最佳实践</a><a href="#h22">5. 版本与兼容</a><a href="#h23">附录 A：规则要点（服务假设的规则）</a><a href="#h24">附录 B：curl 示例</a><a href="#h25">附录 C：联调清单</a></nav>
 <main><h1>跑得快 AI 策略服务 · 接口文档 v1</h1>
 <blockquote><p><b>服务内容</b>：整局对局托管（服务端发牌、AI 自动应手、你只需出自己的手）+ 单步决策 / 复盘分析 / 牌谱解码接口。</p></blockquote>
 <blockquote><p><b>内核</b>：生产模型 <code>policy_a2c_final56.pt</code>（A2C 策略网络 + 残局精确求解器 + 规则层），与线上人机对战同一套内核。</p></blockquote>
@@ -402,8 +402,50 @@ SUIT_CN = "♠♥♣♦"
    "combo": null, "handAfter": 15, "patText": "不出"}
 ]}
 </code></pre>
+<h3 id="h20">3.9 <code>POST /v1/belief</code> — 记牌猜牌快照（AI 对对手手牌的推断，只读）</h3>
+<p>请求体与 §3.5 <code>/v1/decide</code> <b>完全一致</b>（<code>my_hand</code> / <code>opp_n</code> / <code>trick</code> / <code>history</code>）。</p>
+<p>不产生决策、无副作用，用于在你自己的界面上展示"AI 认为对手手里大概是什么 / 为什么敢这么领出"。</p>
+<pre><code>
+请求 {"my_hand": [2,13,19,21,24,27,29,39,42,44], "opp_n": 3,
+      "trick": [0,2,1,0], "history": [{"seat":0,"move":[1,3,4,5]}, ...]}
+响应 {
+  "opp_n": 3, "my_n": 10,
+  "worlds": 313,              // 与公开信息一致的可能手牌（按点数构成的向量）数量
+  "exhaustive": true,         // true=全量枚举（残局可严格认证）；false=采样
+  "weighted": true,           // 是否启用对手建模加权（算牌规则）
+  "sharpness": 0.0255,        // top-1 权重占比：越高信念越尖（接近 0 = 信息不足）
+  "ledger": {"3":1,"5":2,"6":3,"K":3,"A":2,"2":1},   // 记牌台账：各点数"未露面"张数
+  "rank_prob": {"K":0.31,"A":0.12},                  // P(对手持有 &gt;=1 张该点数)
+  "rank_exp": {"K":0.33,"A":0.12},                   // 该点数期望张数
+  "top_hands": [{"cards":"44","ranks":{"4":2},"p":0.0198}],   // 最可能的若干构成
+  "facts": [{"kind":"lead_rule1","text":"对手领对9: 通常没有对8/对X (实测命中 91%)"}],
+  "lock": {"vs_trick": {"p_beat":0.0,"certified_locked":true},
+           "leads": [{"cards":"K","ptype":0}]},
+  "incomplete_snapshot": false
+}
+</code></pre>
+<p>字段与用法：</p>
+<ul>
+<li><code>ledger</code> 是"记牌"：<code>总量 − 我的当前手牌 − 双方已出</code>，可直接做成台账 UI。</li>
+</ul>
+<ul>
+<li><code>rank_prob</code> / <code>rank_exp</code> / <code>top_hands</code> 是"猜牌"：对手手牌的点数分布与最可能构成。</li>
+</ul>
+<ul>
+<li><code>facts</code> 是<b>可解释推断链</b>，每条带实测命中率（<code>lead_rule1/2/3</code>=领出规则、<code>pass</code>=过牌硬约束、<code>gap</code>=断7/断10、<code>tell</code>=三带暗示被打破）。<code>kind</code> 便于分类展示。</li>
+</ul>
+<ul>
+<li><code>lock.leads</code> 是<b>锁牌认证</b>：这些领出在全部可能手牌上严格枚举后"对手必压不住"（保牌权）；<code>certified_locked</code> 需要 <code>exhaustive=true</code> 才有严格含义。</li>
+</ul>
+<ul>
+<li><code>worlds</code> 很大（中盘 10^5~10^6）说明该时刻信息不足，<code>sharpness</code> 低属正常，不要当成故障。</li>
+</ul>
+<ul>
+<li>延迟参考：实测开场 ~0.3s、中盘 ~0.8s、残局 ~0.25s；建议 UI 上加 1 秒内的 loading 态。</li>
+</ul>
 <hr>
-<h2 id="h20">4. 最佳实践</h2>
+<hr>
+<h2 id="h21">4. 最佳实践</h2>
 <ol>
 <li><b>顺序调用</b>：并发上限 1，请勿对同一个 <code>gid</code> 并发调用；需要多局并行请与服务方沟通配额。</li>
 </ol>
@@ -426,7 +468,7 @@ SUIT_CN = "♠♥♣♦"
 <li><b>上线自检</b>：<code>GET /v1/health</code> 应返回 <code>netProbe.net = "a2c-final56(56x)"</code>；用 §2.3 的测试向量核对你的牌型实现。</li>
 </ol>
 <hr>
-<h2 id="h21">5. 版本与兼容</h2>
+<h2 id="h22">5. 版本与兼容</h2>
 <ul>
 <li>路径版本 <code>/v1</code>；破坏性变更会另开 <code>/v2</code>，<code>v1</code> 至少保留 3 个月。</li>
 </ul>
@@ -437,7 +479,7 @@ SUIT_CN = "♠♥♣♦"
 <li>决策行为会随内核版本迭代（这是"始终用最新最强模型"的代价）；需要冻结版本请与服务方约定。</li>
 </ul>
 <hr>
-<h2 id="h22">附录 A：规则要点（服务假设的规则）</h2>
+<h2 id="h23">附录 A：规则要点（服务假设的规则）</h2>
 <ol>
 <li>牌库 48 张 = 去掉大小王、三张 2（♥2 ♣2 ♦2）、一张 A；<b>黑桃 2 保留且为全场最大单张</b></li>
 </ol>
@@ -462,7 +504,7 @@ SUIT_CN = "♠♥♣♦"
 <ol>
 <li>顺子中不能出现 2；A 只作大牌</li>
 </ol>
-<h2 id="h23">附录 B：curl 示例</h2>
+<h2 id="h24">附录 B：curl 示例</h2>
 <pre><code>
 KEY="pdk_live_xxxx"
 BASE="https://chinesetestsite.com/pdk-ai/v1"
@@ -483,7 +525,7 @@ curl -s -X POST "$BASE/decide" -H "X-API-Key: $KEY" -H 'Content-Type: applicatio
      -d '{"my_hand":[0,4,8,12,16,20,24,28,32,36,40,44,45,46,48,5],"opp_n":16,"trick":null,"history":[],"explain":true}' \
      | python3 -m json.tool
 </code></pre>
-<h2 id="h24">附录 C：联调清单</h2>
+<h2 id="h25">附录 C：联调清单</h2>
 <table><thead><tr><th>#</th><th>事项</th><th>说明</th></tr></thead><tbody>
 <tr><td>1</td><td>拿到 API Key</td><td>服务方单独提供；请勿提交到公开仓库/前端代码</td></tr>
 <tr><td>2</td><td>出口 IP</td><td>若你的服务器出口 IP 固定，告知服务方加入白名单（可显著降低 Key 泄露风险）</td></tr>

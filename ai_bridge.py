@@ -778,6 +778,234 @@ def do_suggest(p):
 
 
 
+# ---------------- 记牌猜牌（belief 快照） ----------------
+# 上游 pdk-ai 8db4fb79 起提供 /api/belief：给定"我手牌 + 对手张数 + 待跟牌型 + 动作史"，
+# 返回 AI 对对手手牌的推断快照（记牌台账/点数概率/最可能手牌/推断链/锁牌认证）。
+# 这里镜像同一契约，但规则 cfg 取"当局真实 opts"——上游用模块级 CFG，而网页版可能带
+# 自定义开关（炸弹不可拆/三张不可接…），记牌与过牌推断必须按当局规则算才对得上。
+BELIEF_LOCK_MAX_WORLDS = _env_int("PDK_BELIEF_LOCK_MAX") or 8000      # lock.vs_trick 认证的世界数上限（性能保护）
+BELIEF_LEADS_MAX_WORLDS = _env_int("PDK_BELIEF_LEADS_MAX") or 1200    # lock.leads 候选认证的世界数上限
+BELIEF_LEADS_MAX_CANDS = _env_int("PDK_BELIEF_LEADS_CANDS") or 24     # 最多认证多少个合法领出候选
+BELIEF_LOCK_DEADLINE = float(_env_int("PDK_BELIEF_LOCK_MS") or 1500) / 1000.0   # 认证总预算（秒）
+
+
+def _belief_core(payload: dict, cfg) -> dict:
+    """与上游 server._belief_report 同字段同口径的记牌猜牌快照（cfg 可选）。"""
+    import numpy as np
+    from pdk.core import COPIES, N_RANKS, rank_of
+
+    my_ids = check_cards(payload.get("my_hand"))
+    if not my_ids:
+        raise ApiError("my_hand 必填（我方当前手牌，牌 id 数组）")
+    if len(my_ids) > MAX_HANDS_N:
+        raise ApiError(f"my_hand 张数过多（{len(my_ids)} > {MAX_HANDS_N}）")
+    try:
+        opp_n = int(payload.get("opp_n", -1))
+    except (TypeError, ValueError):
+        raise ApiError("opp_n 必须是整数")
+    if not (0 <= opp_n <= 19):
+        raise ApiError(f"opp_n 非法: {opp_n}（应为对手剩余张数 0..19）")
+    history = payload.get("history") or []
+    if not isinstance(history, list):
+        raise ApiError("history 必须是数组")
+    if len(history) > MAX_HISTORY:
+        raise ApiError(f"history 过长（{len(history)} > {MAX_HISTORY}）")
+    trick = _check_trick(payload.get("trick"))
+
+    facts: list = []
+    try:
+        st = bot_server._replay_decide_history(my_ids, opp_n, history, cfg,
+                                               choice_alpha=0.4, facts=facts)
+    except TypeError:                       # 旧上游无 facts 出参
+        st = bot_server._replay_decide_history(my_ids, opp_n, history, cfg,
+                                               choice_alpha=0.4)
+        facts = []
+    b = st["belief"]
+    my_cnt = st["my_cnt"]
+    try:
+        bot_server._fact_gaps(my_cnt, st["played_me"], st["played_opp"], facts)
+    except Exception:
+        pass
+    # tell（用户规则③后半）：先前的三带暗示被更小单张打破 -> 对手在抢着走牌
+    implied = [f.get("implied_min") for f in facts
+               if isinstance(f, dict) and f.get("kind") == "lead_rule3"
+               and "implied_min" in f]
+    if implied:
+        mn = max(implied)
+        small = []
+        for h in history:
+            if int(h.get("seat", -1)) != 1:
+                continue
+            mv = h.get("move") or []
+            if len(mv) == 1 and rank_of(mv[0]) < mn:
+                small.append(bot_server.RANK_TXT[rank_of(mv[0])])
+        if small:
+            facts.append({
+                "kind": "tell",
+                "text": f"tell: 他先前的三带带牌最小 {bot_server.RANK_TXT[mn]}, "
+                        f"之后却出了更小的单张 {'/'.join(sorted(set(small)))} "
+                        f"-> 要么在抢着走牌要么在制造过牌假象 (用户规则③: 这轮要用大牌顶)",
+            })
+
+    rows, w = b.rows, b.weights
+    z = float(w.sum()) if len(w) else 0.0
+    if z <= 0:
+        z = 1.0
+    rank_prob, rank_exp = {}, {}
+    if len(rows):
+        m1 = (rows >= 1)
+        rp = (m1 * w[:, None]).sum(axis=0) / z
+        re_ = (rows * w[:, None]).sum(axis=0) / z
+        for r in range(N_RANKS):
+            if rp[r] > 1e-6 or re_[r] > 1e-6:
+                rank_prob[bot_server.RANK_TXT[r]] = round(float(rp[r]), 4)
+                rank_exp[bot_server.RANK_TXT[r]] = round(float(re_[r]), 3)
+    order = np.argsort(-w)[:8] if len(rows) else []
+    top_hands = []
+    for i in order:
+        cnt = rows[i]
+        cards = "".join(bot_server.RANK_TXT[r] * int(cnt[r]) for r in range(N_RANKS))
+        top_hands.append({
+            "cards": cards,
+            "ranks": {bot_server.RANK_TXT[r]: int(cnt[r]) for r in range(N_RANKS) if cnt[r]},
+            "p": round(float(w[i] / z), 5),
+        })
+    ledger = {}
+    for r in range(N_RANKS):
+        rem = COPIES[r] - my_cnt[r] - st["played_me"][r] - st["played_opp"][r]
+        if rem > 0:
+            ledger[bot_server.RANK_TXT[r]] = int(rem)
+
+    # 锁牌认证：世界集上"对手不可能压住"的严格判定。
+    # 上游对 vs_trick / leads 会遍历全部世界并逐候选求值（实测：1.7 万世界 + 40 候选 ≈ 3s，
+    # 开局 30 万世界 ≈ 分钟级）——前端面板必须秒回，故按世界数设上限；被跳过时明确标注
+    # skipped（不给"看似认证、实则采样"的假结论），残局（构成数小）照常严格认证。
+    lock = {"vs_trick": None, "leads": [], "worlds_capped": False,
+            "limits": {"vs_trick_max_worlds": BELIEF_LOCK_MAX_WORLDS,
+                       "leads_max_worlds": BELIEF_LEADS_MAX_WORLDS}}
+    _deadline = time.time() + BELIEF_LOCK_DEADLINE
+
+    def _beatable(pat4):
+        from pdk import fast as _f
+        beat = 0
+        tot = 0.0
+        pat = tuple(int(x) for x in pat4)
+        for i, wt in enumerate(w):
+            if wt <= 0:
+                continue
+            tot += float(wt)
+            if _f.gen_beats_codes(rows[i], pat, cfg):
+                beat += float(wt)
+        return {"p_beat": round(beat / tot, 4) if tot > 0 else None,
+                "certified_locked": bool(tot > 0 and beat == 0)}
+
+    if trick:
+        if len(rows) <= BELIEF_LOCK_MAX_WORLDS:
+            lock["vs_trick"] = _beatable(tuple(int(x) for x in trick))
+        else:
+            lock["worlds_capped"] = True
+            lock["vs_trick"] = {"p_beat": None, "certified_locked": False,
+                                "skipped": f"可能构成 {len(rows)} 种 > {BELIEF_LOCK_MAX_WORLDS}，未做严格认证"}
+    total = sum(my_cnt) + opp_n
+    if total <= 16:                          # 残局：枚举下认证候选领出
+        from pdk import fast as _f
+        if len(rows) > BELIEF_LEADS_MAX_WORLDS:
+            lock["leads_skipped"] = (f"可能构成 {len(rows)} 种 > {BELIEF_LEADS_MAX_WORLDS}，"
+                                     f"未做领出认证")
+        else:
+            try:
+                leads = list(_f.gen_leads_codes(my_cnt, cfg))
+            except Exception:
+                leads = []
+            for m in leads[:BELIEF_LEADS_MAX_CANDS]:
+                if m == 0 or time.time() > _deadline:
+                    break
+                pm = (_f.classify_code(m, False, cfg) or _f.classify_code(m, True, cfg))
+                if pm is None:
+                    continue
+                info = _beatable((int(pm.ptype), int(pm.main), int(pm.length), int(pm.nc)))
+                if info.get("certified_locked"):
+                    cards = "".join(bot_server.RANK_TXT[r] * ((m >> (3 * r)) & 7)
+                                    for r in range(N_RANKS))
+                    lock["leads"].append({"cards": cards, "ptype": int(pm.ptype)})
+                    if len(lock["leads"]) >= 8:
+                        break
+    return {
+        "opp_n": opp_n,
+        "my_n": sum(my_cnt),
+        "worlds": int(len(rows)),
+        "exhaustive": bool(getattr(b, "exhaustive", False)),
+        "weighted": bool(getattr(b, "has_weights", False)),
+        "sharpness": round(float(w[order[0]] / z), 5) if len(order) else None,
+        "ledger": ledger,
+        "rank_prob": rank_prob,
+        "rank_exp": rank_exp,
+        "top_hands": top_hands,
+        "facts": facts,
+        "lock": lock,
+        "incomplete_snapshot": bool(st.get("incomplete")),
+    }
+
+
+def _session_belief_payload(s: Shadow, persp: str) -> dict:
+    """把会话局面转成无状态口径的 belief 请求（perspective 决定"谁是我"）。
+
+    persp="ai" -> 以 AI 自己为"我"（看它怎么猜玩家、它认哪些领出必压不住）
+    persp="me" -> 以玩家为"我"（玩家的猜牌助手：AI 手里大概有什么）
+    """
+    if persp not in ("ai", "me"):
+        raise ApiError('perspective 只能是 "ai"（AI 看我）或 "me"（我看 AI）')
+    me_seat = 1 if persp == "ai" else 0
+    opp_seat = 1 - me_seat
+    if not s.game.hand_ids(me_seat):
+        raise ApiError("该视角当前已无手牌（本局结束或已出完），没有记牌猜牌快照可算")
+    turn = int(s.cg.g.turn)
+    trick = None
+    if turn == me_seat and int(s.cg.g.trick[0]) != 255:
+        trick = [int(x) for x in s.cg.g.trick]
+    history = []
+    for mv in s.moves_detail:
+        web_seat = int(mv["seat"])
+        up_seat = (1 - web_seat) if persp == "ai" else web_seat
+        history.append({"seat": up_seat,
+                        "move": [int(x) for x in (mv.get("cards") or [])],
+                        "pass_on": mv.get("pass_on")})
+    return {"my_hand": [int(x) for x in s.game.hand_ids(me_seat)],
+            "opp_n": int(s.game.hand_count(opp_seat)),
+            "trick": trick, "history": history}
+
+
+def do_belief(p: dict):
+    """AI 猜测对手手牌（记牌/猜牌/锁牌）快照。
+
+    两种入参：
+      1) {"sid": ..., "perspective": "ai"|"me"}   —— 会话版：按当局真实手牌与动作史现算（H5 面板用）
+      2) {"my_hand": [...], "opp_n": 8, "trick": null|[ptype,main,len,nc],
+          "history": [{"seat":0|1,"move":[id...]},...]}  —— 无状态版（与上游 /api/belief 同契约）
+    """
+    if p.get("sid"):
+        sid = check_ident(p.get("sid"), "sid")
+        s = get_sess(sid)
+        with s.lock:
+            if s.bad:
+                return {"error": "影子牌局已失效", "type": "ShadowBad"}, 500
+            persp = str(p.get("perspective") or "ai")
+            payload = _session_belief_payload(s, persp)
+            with decide_gate():
+                out = _belief_core(payload, s.cfg)
+            out["view"] = {"perspective": persp,
+                           "my_seat": 1 if persp == "ai" else 0,
+                           "ply": len(s.moves_detail),
+                           "turn": int(s.cg.g.turn),
+                           "my_n": len(payload["my_hand"]),
+                           "opp_n": payload["opp_n"]}
+            return out, 200
+    cfg = build_cfg(p.get("opts") or {})
+    with decide_gate():
+        out = _belief_core(p, cfg)
+    return out, 200
+
+
 def do_explain(p: dict):
     """出牌解释（明牌模式：AI 这手为什么这么出）。
 
@@ -1585,8 +1813,9 @@ def run_selftest() -> dict:
                     "再按 rid 查 data/api_log/<日期>.jsonl"}
 
 
-PUBLIC_GET = {"/health", "/api/state"}
+PUBLIC_GET = {"/health", "/api/health", "/api/state"}
 PUBLIC_POST = {"/api/decide", "/api/explain", "/api/analyze", "/api/decode",
+               "/api/belief",
                "/api/new_game", "/api/play", "/api/suggest", "/api/selftest"}
 
 
@@ -1630,7 +1859,7 @@ class Handler(BaseHTTPRequestHandler):
                 status_holder["code"] = 404
                 met_record(u.path, (time.perf_counter()-t0)*1000, 404, rid, err="NotFound")
                 return self._json({"error": "该接口不在公开实例上提供", "rid": rid}, 404)
-            if u.path == "/health":
+            if u.path in ("/health", "/api/health"):   # 上游用 /api/health：别名以兼容共用联调脚本
                 with LOCK:
                     n = len(SESSIONS)
                 comp = component_probes()
@@ -1762,6 +1991,8 @@ class Handler(BaseHTTPRequestHandler):
                 body, code = do_decide(payload)
             elif u.path == "/api/explain":
                 body, code = do_explain(payload)
+            elif u.path == "/api/belief":
+                body, code = do_belief(payload)
             elif u.path == "/api/analyze":
                 body, code = do_analyze(payload)
             elif u.path == "/api/selftest":
@@ -1832,6 +2063,18 @@ def restore_sessions():
     这样重启（部署/升级）不会打断正在进行的对局。"""
     global RESTORING
     n = 0
+    try:
+        n = _restore_sessions_inner()
+    except Exception as e:                    # 兜底：绝不让 RESTORING 卡住（否则未知 sid 永久 503）
+        print(f"[bridge] 会话恢复异常：{type(e).__name__}: {e}", file=sys.stderr, flush=True)
+    finally:
+        RESTORING = False
+    if n:
+        print(f"[bridge] restored {n} live session(s) across restart", flush=True)
+
+
+def _restore_sessions_inner() -> int:
+    n = 0
     for f in REPLAY_DIR.glob("*.json"):
         try:
             d = json.loads(f.read_text(encoding="utf-8"))
@@ -1861,9 +2104,7 @@ def restore_sessions():
             n += 1
         except Exception as e:
             print(f"[bridge] 恢复会话 {sid} 失败：{type(e).__name__}: {e}", file=sys.stderr, flush=True)
-    RESTORING = False
-    if n:
-        print(f"[bridge] restored {n} live session(s) across restart", flush=True)
+    return n
 
 
 class BridgeServer(ThreadingHTTPServer):
@@ -1886,7 +2127,7 @@ def main():
     ap.add_argument("--decide-timeout", type=float, default=0.0, help="决策排队超时秒数")
     args = ap.parse_args()
 
-    global _ACT_SEM, PUBLIC_MODE, MAX_SESSIONS, REPLAY_DIR, IDLE_TTL, DECIDE_TIMEOUT, REPLAY_ON, REPLAY_PREFIX
+    global _ACT_SEM, PUBLIC_MODE, MAX_SESSIONS, REPLAY_DIR, IDLE_TTL, DECIDE_TIMEOUT, REPLAY_ON, REPLAY_PREFIX, RESTORING
     PUBLIC_MODE = bool(args.public_api)
     REPLAY_ON = bool(args.replay)
     if args.no_prefix:
@@ -1916,6 +2157,10 @@ def main():
         print(f"[bridge] 公开实例：{sorted(PUBLIC_POST | PUBLIC_GET)}  replay={REPLAY_ON} "
               f"dir={REPLAY_DIR} sessions<={MAX_SESSIONS} idleTTL={IDLE_TTL:.0f}s "
               f"decideTimeout={DECIDE_TIMEOUT:.0f}s", flush=True)
+    if PUBLIC_MODE:
+        # 对外实例按设计不恢复历史会话（隔离 CPU/内存），必须立刻放行：
+        # 否则 RESTORING 永远为真 -> 未知/过期 sid 会一直回 503「恢复中」而不是 404。
+        RESTORING = False
     else:
         threading.Thread(target=restore_sessions, daemon=True).start()   # 端口先就绪，会话后台恢复
     threading.Thread(target=session_sweeper, daemon=True).start()       # 空闲会话回收

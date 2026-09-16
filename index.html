@@ -185,12 +185,34 @@
         </div>
         <div class="actions">
           <span id="turn-tip" class="turn-tip"></span>
+          <button id="btn-belief" class="btn belief-btn hidden" title="AI 的记牌与猜牌：它认为对手手里大概是什么">🧠 记牌猜牌</button>
           <button id="btn-hint" class="btn hint-btn2">💡 提示</button>
           <button id="btn-pass" class="btn warn">不出</button>
           <button id="btn-play" class="btn primary">出牌</button>
         </div>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- ======== 记牌猜牌（AI 心眼；移动端底部抽屉，可下拉关闭） ======== -->
+<div id="belief-sheet" class="sheet hidden">
+  <div class="sheet-mask" id="belief-mask"></div>
+  <div class="sheet-card" id="belief-card" role="dialog" aria-modal="true" aria-labelledby="belief-title">
+    <div class="sheet-grip" id="belief-grip"><span></span></div>
+    <div class="sheet-head">
+      <div class="sheet-title" id="belief-title">🧠 记牌猜牌</div>
+      <div class="sheet-icons">
+        <button class="sheet-icon" id="belief-refresh" title="重新计算" aria-label="重新计算">🔄</button>
+        <button class="sheet-icon" id="belief-close" title="关闭" aria-label="关闭">✕</button>
+      </div>
+    </div>
+    <div class="seg hidden" id="belief-tabs" role="tablist">
+      <button class="seg-btn active" data-persp="ai" role="tab">AI 看我</button>
+      <button class="seg-btn" data-persp="me" role="tab">我看 AI</button>
+    </div>
+    <div class="belief-meta" id="belief-meta"></div>
+    <div class="sheet-body" id="belief-body"></div>
   </div>
 </div>
 

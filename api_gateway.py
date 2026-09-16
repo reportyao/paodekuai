@@ -52,6 +52,7 @@ ROUTES = {
     "health": "/health",
     "decide": "/api/decide",
     "explain": "/api/explain",
+    "belief": "/api/belief",
     "analyze": "/api/analyze",
     "decode": "/api/decode",
     "new_game": "/api/new_game",

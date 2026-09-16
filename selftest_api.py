@@ -11,6 +11,7 @@ import time
 import urllib.error
 import urllib.request
 
+PUBLIC_ONLY = os.environ.get("PDK_PUBLIC_ONLY") == "1"   # 1=只测对外实例（跳过 /init /action /act 等网页专有接口）
 B = os.environ.get("PDK_API_BASE", "http://127.0.0.1:8766").rstrip("/")
 if not B.endswith("/ai") and "127.0.0.1:8310" in B:
     B += "/ai"
@@ -178,77 +179,139 @@ check("未知接口 -> 404", st == 404, st)
 st, r, _ = call(f"/api/state")
 check("state 缺 gid -> 400", st == 400, (st, r))
 
-print("=== 8) 网页版既有接口回归 ===")
-import random
-DECK48 = list(range(44)) + [44, 45, 46, 48]          # pdk 原生牌库（不含 47）
-ids = list(DECK48)
-random.Random(7).shuffle(ids)
-kitty, h0, h1 = ids[:16], sorted(ids[16:32]), sorted(ids[32:48])
-st, init, _ = call("/init", {"hands": [h0, h1], "kitty": kitty, "leader": 0,
-                             "opts": {"red10": True}, "mode": "hybrid"})
-check("init 200", st == 200, init)
-sid = init.get("sid")
-st, lg, _ = call(f"/legal?sid={sid}&seat=0")
-check("legal 出牌方有手", st == 200 and len(lg.get("legal") or []) > 0, st)
-st, lg2, _ = call(f"/legal?sid={sid}&seat=1")
-check("legal 非出牌方返回空", st == 200 and (lg2.get("legal") or []) == [], (st, lg2.get("legal")))
-st, r, _ = call(f"/legal?sid={sid}")
-check("legal 缺 seat 参数仍可用", st == 200, st)
-st, r, _ = call("/legal")
-check("legal 缺 sid -> 400", st == 400, (st, r))
-st, act, _ = call("/act", {"sid": sid})
-check("act 非 AI 回合 -> 400", st == 400, (st, act))
-mv = min([c for c in lg["legal"] if len(c) == 1] or lg["legal"], key=lambda c: (len(c), c[0]))
-st, r, _ = call("/action", {"sid": sid, "seat": 0, "cards": mv})
-check("action 200", st == 200, r)
-st, r, _ = call("/action", {"sid": sid, "seat": 0, "cards": "xx"})
-check("action cards 非法 -> 400", st == 400, (st, r))
-st, r, _ = call("/action", {"sid": sid, "seat": 9, "cards": []})
-check("action seat 非法 -> 400", st == 400, (st, r))
-st, act, _ = call("/act", {"sid": sid})
-check("act 200（AI 出牌）", st == 200 and act.get("cards"), act)
-_probe = call(f"/legal?sid={sid}&seat=0")[1]
-codes_played = []                                     # 会话真实动作码（给 decode 用）
-for _m in [mv] + ([act.get("cards")] if act.get("cards") else []):
-    codes_played.append(1 if False else None)
-# 从会话重放文件读真实 codes（最可靠）
-import glob as _glob, os as _os
-_f = sorted(_glob.glob("data/replays/*.json"), key=_os.path.getmtime, reverse=True)
-codes_played = []
-for _p in _f[:5]:
-    _d = json.load(open(_p, encoding="utf-8"))
-    if _d.get("sid") == sid:
-        codes_played = list(_d.get("codes") or [])
-        break
-check("拿到会话真实动作码", len(codes_played) >= 1, codes_played)
-st, ex, dt = call("/api/explain", {"sid": sid, "ply": 2})
-check("explain 会话版（缓存瞬时）", st == 200 and ex.get("text"), (st, str(ex)[:120]))
-st, an, dt = call("/api/analyze", {"sid": sid, "ply": 1})
-check("analyze 会话版", st == 200 and an.get("recorded") and an.get("decided"), (st, str(an)[:120]))
-st, d, _ = call("/api/decode", {"initial_hands": [h0, h1], "first_player": 0, "opts": {},
-                                "moves": codes_played})
-check("decode 直传（真实牌谱）", st == 200 and len(d.get("moves") or []) == len(codes_played),
-      (st, str(d)[:160]))
-if st == 200:
-    m0 = d["moves"][0]
-    check("decode 座位/牌面正确", m0.get("seat") == 0 and m0.get("cards") == mv,
-          (m0.get("seat"), m0.get("cards"), mv))
-# 路径穿越防御
-st, r, _ = call("/init", {"hands": [h0, h1], "kitty": kitty, "leader": 0, "opts": {},
-                          "sid": "../../evil"})
-check("init sid 穿越 -> 400", st == 400, (st, str(r)[:100]))
-st, r, _ = call("/init", {"hands": [h0, h1], "kitty": kitty, "leader": 0, "opts": {},
-                          "sid": "abcd1234", "file": "../../evil.json"})
-check("init file 穿越 -> 400", st == 400, (st, str(r)[:100]))
-st, r, _ = call("/init", {"hands": [h0[:15], h1], "kitty": kitty, "leader": 0, "opts": {}})
-check("init 手牌 15 张 -> 400", st == 400, (st, str(r)[:100]))
-st, r, _ = call("/init", {"hands": [h0, h1], "kitty": kitty, "leader": 0,
-                          "opts": {"bogus": True}})
-check("init opts 未知键 -> 400", st == 400, (st, str(r)[:100]))
-st, hs, _ = call("/health")
-check("health 版本信息", hs.get("pdkCommit") is not None
-      and "openingBudget" in (hs.get("productionConfig") or {}), hs.get("productionConfig"))
+if not PUBLIC_ONLY:                          # 对外实例只开无状态/整局接口，跳过网页专有段落
+    print("=== 8) 网页版既有接口回归（仅网页实例）===")
+    import random
+    DECK48 = list(range(44)) + [44, 45, 46, 48]          # pdk 原生牌库（不含 47）
+    ids = list(DECK48)
+    random.Random(7).shuffle(ids)
+    kitty, h0, h1 = ids[:16], sorted(ids[16:32]), sorted(ids[32:48])
+    st, init, _ = call("/init", {"hands": [h0, h1], "kitty": kitty, "leader": 0,
+                                 "opts": {"red10": True}, "mode": "hybrid"})
+    check("init 200", st == 200, init)
+    sid = init.get("sid")
+    st, lg, _ = call(f"/legal?sid={sid}&seat=0")
+    check("legal 出牌方有手", st == 200 and len(lg.get("legal") or []) > 0, st)
+    st, lg2, _ = call(f"/legal?sid={sid}&seat=1")
+    check("legal 非出牌方返回空", st == 200 and (lg2.get("legal") or []) == [], (st, lg2.get("legal")))
+    st, r, _ = call(f"/legal?sid={sid}")
+    check("legal 缺 seat 参数仍可用", st == 200, st)
+    st, r, _ = call("/legal")
+    check("legal 缺 sid -> 400", st == 400, (st, r))
+    st, act, _ = call("/act", {"sid": sid})
+    check("act 非 AI 回合 -> 400", st == 400, (st, act))
+    mv = min([c for c in lg["legal"] if len(c) == 1] or lg["legal"], key=lambda c: (len(c), c[0]))
+    st, r, _ = call("/action", {"sid": sid, "seat": 0, "cards": mv})
+    check("action 200", st == 200, r)
+    st, r, _ = call("/action", {"sid": sid, "seat": 0, "cards": "xx"})
+    check("action cards 非法 -> 400", st == 400, (st, r))
+    st, r, _ = call("/action", {"sid": sid, "seat": 9, "cards": []})
+    check("action seat 非法 -> 400", st == 400, (st, r))
+    st, act, _ = call("/act", {"sid": sid})
+    check("act 200（AI 出牌）", st == 200 and act.get("cards"), act)
+    _probe = call(f"/legal?sid={sid}&seat=0")[1]
+    codes_played = []                                     # 会话真实动作码（给 decode 用）
+    for _m in [mv] + ([act.get("cards")] if act.get("cards") else []):
+        codes_played.append(1 if False else None)
+    # 从会话重放文件读真实 codes（最可靠）
+    import glob as _glob, os as _os
+    _f = sorted(_glob.glob("data/replays/*.json"), key=_os.path.getmtime, reverse=True)
+    codes_played = []
+    for _p in _f[:5]:
+        _d = json.load(open(_p, encoding="utf-8"))
+        if _d.get("sid") == sid:
+            codes_played = list(_d.get("codes") or [])
+            break
+    check("拿到会话真实动作码", len(codes_played) >= 1, codes_played)
+    st, ex, dt = call("/api/explain", {"sid": sid, "ply": 2})
+    check("explain 会话版（缓存瞬时）", st == 200 and ex.get("text"), (st, str(ex)[:120]))
+    st, an, dt = call("/api/analyze", {"sid": sid, "ply": 1})
+    check("analyze 会话版", st == 200 and an.get("recorded") and an.get("decided"), (st, str(an)[:120]))
+    st, d, _ = call("/api/decode", {"initial_hands": [h0, h1], "first_player": 0, "opts": {},
+                                    "moves": codes_played})
+    check("decode 直传（真实牌谱）", st == 200 and len(d.get("moves") or []) == len(codes_played),
+          (st, str(d)[:160]))
+    if st == 200:
+        m0 = d["moves"][0]
+        check("decode 座位/牌面正确", m0.get("seat") == 0 and m0.get("cards") == mv,
+              (m0.get("seat"), m0.get("cards"), mv))
+    # 路径穿越防御
+    st, r, _ = call("/init", {"hands": [h0, h1], "kitty": kitty, "leader": 0, "opts": {},
+                              "sid": "../../evil"})
+    check("init sid 穿越 -> 400", st == 400, (st, str(r)[:100]))
+    st, r, _ = call("/init", {"hands": [h0, h1], "kitty": kitty, "leader": 0, "opts": {},
+                              "sid": "abcd1234", "file": "../../evil.json"})
+    check("init file 穿越 -> 400", st == 400, (st, str(r)[:100]))
+    st, r, _ = call("/init", {"hands": [h0[:15], h1], "kitty": kitty, "leader": 0, "opts": {}})
+    check("init 手牌 15 张 -> 400", st == 400, (st, str(r)[:100]))
+    st, r, _ = call("/init", {"hands": [h0, h1], "kitty": kitty, "leader": 0,
+                              "opts": {"bogus": True}})
+    check("init opts 未知键 -> 400", st == 400, (st, str(r)[:100]))
+    st, hs, _ = call("/health")
+    check("health 版本信息", hs.get("pdkCommit") is not None
+          and "openingBudget" in (hs.get("productionConfig") or {}), hs.get("productionConfig"))
 
+print("=== 9) /api/belief 记牌猜牌（契约 + 会话两视角 + 负例）===")
+A0519_HAND = [2, 13, 19, 21, 24, 27, 29, 39, 42, 44]
+A0519_HIST = [
+    {"seat": 0, "move": [1, 3, 4, 5], "pass_on": None},
+    {"seat": 1, "move": [6, 7, 8, 9], "pass_on": None},
+    {"seat": 0, "move": [16, 18, 20, 23], "pass_on": None},
+    {"seat": 1, "move": [], "pass_on": None},
+]
+st, b, dt = call("/api/belief", {"my_hand": A0519_HAND, "opp_n": 3,
+                                 "trick": [0, 2, 1, 0], "history": A0519_HIST})
+NEED = {"worlds", "exhaustive", "weighted", "sharpness", "ledger", "rank_prob",
+        "rank_exp", "top_hands", "facts", "lock"}
+check("belief 200", st == 200, str(b)[:160])
+check("belief 字段齐全", NEED <= set(b), sorted(set(b))[:10])
+check("belief.worlds>0", int(b.get("worlds", 0)) > 0, b.get("worlds"))
+check("belief.top_hands 概率和<=1", sum(h.get("p", 0) for h in b.get("top_hands", [])) <= 1.001,
+      (b.get("top_hands") or [])[:1])
+check("belief.ledger 每点 0..4", all(0 <= v <= 4 for v in (b.get("ledger") or {}).values()),
+      b.get("ledger"))
+check("belief.facts 为 {kind,text} 结构", all(isinstance(f, dict) and f.get("text")
+      for f in (b.get("facts") or [])), (b.get("facts") or [])[:1])
+check("belief.lock 结构含 leads", isinstance(b.get("lock"), dict) and "leads" in b["lock"],
+      str(b.get("lock"))[:120])
+check("belief 概率与期望自洽（rank_prob >= rank_exp/4）",
+      all(float((b.get("rank_prob") or {}).get(k, 0)) + 1e-6 >= float(v) / 4.0
+          for k, v in (b.get("rank_exp") or {}).items()), b.get("rank_exp"))
+st, r, _ = call("/api/belief", {"my_hand": [], "opp_n": 0, "trick": None, "history": []})
+check("belief 空手牌 -> 400", st == 400, (st, str(r)[:90]))
+st, r, _ = call("/api/belief", {"my_hand": [0], "opp_n": 99, "trick": None, "history": []})
+check("belief opp_n 越界 -> 400", st == 400, (st, str(r)[:90]))
+st, g2, _ = call("/api/new_game", {})
+gidB = g2.get("gid") or gid
+if gidB:
+    st, v1, dt = call("/api/belief", {"sid": gidB, "perspective": "ai"})
+    check("belief 会话版(AI 看我) 200",
+          st == 200 and (v1.get("view") or {}).get("perspective") == "ai", (st, str(v1)[:120]))
+    check("belief 会话版带当前局面",
+          (v1.get("view") or {}).get("my_n") is not None
+          and (v1.get("view") or {}).get("turn") in (0, 1), v1.get("view"))
+    st, v2, dt = call("/api/belief", {"sid": gidB, "perspective": "me"})
+    check("belief 会话版(我看 AI) 200",
+          st == 200 and (v2.get("view") or {}).get("perspective") == "me", (st, str(v2)[:120]))
+    st, r, _ = call("/api/belief", {"sid": gidB, "perspective": "xx"})
+    check("belief 非法 perspective -> 400", st == 400, (st, str(r)[:90]))
+    st, r, _ = call("/api/belief", {"sid": "deadbeefdeadbeefdeadbeef", "perspective": "ai"})
+    check("belief 未知 sid -> 404", st == 404, st)
+    if gid:
+        # 已结束的局：出完牌的一侧明确报错；仍有牌的一侧给出"对手 0 张"的确定快照
+        res = {}
+        for persp in ("ai", "me"):
+            st2, r2, _ = call("/api/belief", {"sid": gid, "perspective": persp})
+            res[persp] = (st2, r2)
+        empty_side = [k for k, (st2, r2) in res.items()
+                      if st2 == 400 and "手牌" in str(r2.get("error", ""))]
+        ok_side = [k for k, (st2, r2) in res.items() if st2 == 200]
+        check("belief 结束局：出完牌的一侧 400 且说明原因", bool(empty_side), res)
+        check("belief 结束局：仍有牌的一侧给出确定快照（opp_n=0 -> worlds=1）",
+              all(int(r2.get("opp_n", -1)) == 0 and int(r2.get("worlds", 0)) >= 1
+                  for k in ok_side for (st2, r2) in [res[k]]), res)
+else:
+    check("belief 会话版（无 gid 可测）", False, "new_game 未返回 gid")
 print(f"\n=== 汇总：通过 {len(OK)} / 失败 {len(BAD)} ===")
 if BAD:
     for b in BAD:

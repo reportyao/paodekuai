@@ -399,3 +399,103 @@ button { font-family: inherit; }
   .play-explain { font-size: 12px; padding: 5px 10px; }
   .rv-explain { font-size: 12px; }
 }
+
+/* ================= 记牌猜牌面板（AI 心眼）：移动端底部抽屉 ================= */
+.belief-btn { background: linear-gradient(180deg, #2a4a6a, #1d3550);
+              border: 1px solid rgba(140, 200, 255, .5); color: #d8ecff; }
+.sheet { position: fixed; inset: 0; z-index: 60; }
+.sheet.hidden { display: none; }
+.sheet-mask { position: absolute; inset: 0; background: rgba(0,0,0,.5);
+              opacity: 0; transition: opacity .22s ease; }
+.sheet.show .sheet-mask { opacity: 1; }
+.sheet-card {
+  position: absolute; left: 0; right: 0; bottom: 0; margin: 0 auto; max-width: 560px;
+  max-height: 80vh; display: flex; flex-direction: column;
+  background: linear-gradient(180deg, #10331f, #0a2416);
+  border: 1px solid rgba(255,216,142,.35); border-bottom: none;
+  border-radius: 18px 18px 0 0; box-shadow: 0 -10px 30px rgba(0,0,0,.5);
+  transform: translateY(100%); transition: transform .26s cubic-bezier(.22,.8,.28,1);
+  padding-bottom: env(safe-area-inset-bottom, 0);
+}
+.sheet.show .sheet-card { transform: translateY(0); }
+.sheet-grip { padding: 8px 0 2px; display: flex; justify-content: center; cursor: grab;
+              touch-action: none; }
+.sheet-grip span { width: 44px; height: 5px; border-radius: 3px; background: rgba(255,255,255,.28); }
+.sheet-head { display: flex; align-items: center; justify-content: space-between;
+              padding: 2px 14px 6px; }
+.sheet-title { font-size: 16px; font-weight: 800; color: #ffd88e; }
+.sheet-icons { display: flex; gap: 6px; }
+.sheet-icon { width: 34px; height: 34px; border-radius: 10px; font-size: 15px; cursor: pointer;
+              background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.18);
+              color: #e9f5ff; display: flex; align-items: center; justify-content: center; }
+.sheet-icon:active { background: rgba(255,255,255,.2); }
+.seg { display: flex; gap: 6px; padding: 0 14px 8px; }
+.seg.hidden { display: none; }
+.seg-btn { flex: 1; min-height: 38px; border-radius: 10px; cursor: pointer; font-size: 13.5px;
+           font-weight: 700; color: #cfe6d8; background: rgba(255,255,255,.06);
+           border: 1px solid rgba(255,255,255,.16); }
+.seg-btn.active { color: #10261a; background: linear-gradient(180deg, #ffe6a8, #ffd070);
+                  border-color: #ffd88e; }
+.belief-meta { padding: 0 14px 8px; font-size: 12px; color: #a9c9b5; line-height: 1.6; }
+.belief-meta .warn { color: #ffb35c; }
+.sheet-body { overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
+              padding: 0 12px 16px; }
+.bf-sec { background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.12);
+          border-radius: 12px; margin-bottom: 10px; overflow: hidden; }
+.bf-sec > summary { list-style: none; cursor: pointer; padding: 10px 12px; font-size: 14px;
+                    font-weight: 700; color: #ffe9b8; display: flex; align-items: center;
+                    gap: 8px; min-height: 44px; }
+.bf-sec > summary::-webkit-details-marker { display: none; }
+.bf-sec > summary .chev { margin-left: auto; opacity: .6; font-size: 12px; transition: transform .2s; }
+.bf-sec[open] > summary .chev { transform: rotate(90deg); }
+.bf-sec > summary .tag { font-size: 11.5px; font-weight: 600; color: #9fd0b4;
+                         background: rgba(255,255,255,.08); border-radius: 20px; padding: 2px 8px; }
+.bf-inner { padding: 2px 12px 12px; }
+.bf-note { font-size: 11.5px; color: #9db8a6; line-height: 1.6; margin: 0 0 8px; }
+.bf-row { display: flex; align-items: center; gap: 8px; margin: 5px 0; font-size: 13px; }
+.bf-row .k { width: 22px; text-align: center; font-weight: 800; color: #ffe9b8; flex-shrink: 0; }
+.bf-bar { position: relative; flex: 1; height: 14px; border-radius: 7px;
+          background: rgba(0,0,0,.32); overflow: hidden; }
+.bf-bar > i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 7px;
+              background: linear-gradient(90deg, #4a9ad6, #7ed0a8); display: block; }
+.bf-row .v { width: 52px; text-align: right; font-variant-numeric: tabular-nums;
+             color: #d8ecff; flex-shrink: 0; font-size: 12.5px; }
+.bf-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(46px, 1fr)); gap: 6px; }
+.bf-cell { background: rgba(0,0,0,.28); border: 1px solid rgba(255,255,255,.1);
+           border-radius: 9px; padding: 6px 2px 5px; text-align: center; }
+.bf-cell .r { font-size: 14px; font-weight: 800; color: #ffe9b8; }
+.bf-cell .n { font-size: 12px; color: #d8ecff; margin-top: 1px; }
+.bf-cell .dots { display: flex; gap: 2px; justify-content: center; margin-top: 4px; }
+.bf-cell .dots i { width: 5px; height: 5px; border-radius: 50%; background: rgba(255,255,255,.18); }
+.bf-cell .dots i.on { background: #7ed0a8; }
+.bf-cell.zero { opacity: .45; }
+.bf-fact { display: flex; gap: 8px; align-items: flex-start; padding: 7px 0;
+           border-top: 1px dashed rgba(255,255,255,.12); font-size: 13px; line-height: 1.6;
+           color: #e6f2ea; }
+.bf-fact:first-child { border-top: none; }
+.bf-fact .ico { flex-shrink: 0; font-size: 14px; }
+.bf-fact .txt { flex: 1; }
+.bf-pill { display: inline-block; font-size: 11px; font-weight: 700; border-radius: 20px;
+           padding: 1px 7px; margin-left: 4px; color: #10261a; background: #7ed0a8;
+           vertical-align: 1px; white-space: nowrap; }
+.bf-pill.low { background: #ffce7a; }
+.bf-pill.rule { background: rgba(255,255,255,.16); color: #cfe6d8; }
+.bf-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.bf-chip { font-family: Georgia, serif; font-size: 14px; letter-spacing: 1px;
+           padding: 5px 10px; border-radius: 9px; background: rgba(255,216,142,.14);
+           border: 1px solid rgba(255,216,142,.4); color: #ffe9b8; }
+.bf-ok { color: #7ee0a8; font-weight: 700; }
+.bf-bad { color: #ffb35c; font-weight: 700; }
+.bf-skel { height: 12px; border-radius: 6px; margin: 8px 0; background:
+           linear-gradient(90deg, rgba(255,255,255,.06), rgba(255,255,255,.16), rgba(255,255,255,.06));
+           background-size: 200% 100%; animation: bf-sk 1.1s linear infinite; }
+@keyframes bf-sk { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+.bf-err { color: #ffb35c; font-size: 13px; line-height: 1.7; }
+.bf-err button { margin-top: 8px; }
+.bf-top { display: flex; align-items: center; gap: 8px; margin: 4px 0 6px; font-size: 13px; }
+.bf-top .cards { font-family: Georgia, serif; font-size: 15px; letter-spacing: 1px;
+                 color: #ffe9b8; }
+@media (max-width: 420px) {
+  .bf-row .v { width: 46px; font-size: 12px; }
+  .sheet-card { max-height: 84vh; }
+}

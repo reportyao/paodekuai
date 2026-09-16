@@ -1251,6 +1251,7 @@ function applyPlay(seat, cards) {
   S.selected = new Set(); S.hints = []; S.hintIdx = -1;
   S.roundMoves.push({ seat, cards: cards.map(c => c.i), combo: { ...combo }, ts: Date.now() });
   if (seat === 1 && S.revealOpp && S.mode === 'ai') showOppExplain(S.roundMoves.length);   // 明牌：解释 AI 这手
+  bfOnPly();                                              // 新的一手：面板打开时自动重算记牌猜牌
   if (seat === 0) clearOppExplain();
   if (S.mode === 'ai' && !isDeck15()) bridgeMirror(seat, cards);   // 镜像出牌（仅16张深度AI）
   if (hand.length === 1) toast('⚠ ' + S.names[seat] + ' 报单！只剩1张', 1800);
@@ -1270,6 +1271,7 @@ function applyPass(seat) {
   if (S.mode === 'ai' && !isDeck15()) bridgeMirror(seat, []);      // 镜像过牌（仅16张深度AI）
   S.turn = 1 - seat;
   if (seat === 1 && S.revealOpp && S.mode === 'ai') showOppExplain(S.roundMoves.length);  // 明牌：AI 为何不出
+  bfOnPly();
   if (seat === 0) clearOppExplain();
   beginTurn();
 }
@@ -1914,6 +1916,7 @@ function renderHandAndActions(me) {
   const showHintBtn = isMyTurn && hasHintRight(me);
   $('btn-hint').classList.toggle('hidden', !showHintBtn);
   $('btn-hint').disabled = !showHintBtn;
+  bfSyncBtn();                                          // 记牌猜牌按钮（人机/热座可用）
   // 提示条
   const hb = $('hint-bar');
   if (!showHintBtn || !S.hints.length) hb.classList.add('hidden');
@@ -2043,6 +2046,7 @@ function syncDeckSpecUI() {
   $('btn-selftest').classList.toggle('hidden', S.deckSpec === 15);   // 自检修的是16张深度AI链路
   document.querySelectorAll('.rev-btn').forEach(b =>
     b.classList.toggle('hidden', S.deckSpec === 15));                // 服务端复盘仅覆盖16张局
+  bfSyncBtn();
   refreshAIVersion();                                                // 版本行随牌副切换（15张显示"简易AI/接口预留"）
 }
 
@@ -2226,7 +2230,330 @@ function quitToLobby() {
   hideModal();
   $('handover').classList.add('hidden');
   $('hint-bar').classList.add('hidden');
+  if (typeof bfClose === 'function') bfClose();
   showScreen('lobby');
+}
+
+/* ================= 记牌猜牌面板（AI 心眼） =================
+ * 数据源：桥接 /api/belief（上游 pdk-ai 8db4fb79 起提供）
+ *   人机对战（16 张，有会话）：{"sid","perspective":"ai"|"me"}
+ *     ai = "AI 看我"（它眼里的你：台账 + 它认为你可能握什么 + 它认出哪些领出必压不住）
+ *     me = "我看 AI"（以你为视角推 AI 的手牌；只用公开信息，不看对手底牌）
+ *   双人热座（无会话）：无状态口径 {"my_hand","opp_n","trick","history"}（当前出牌方视角）
+ * 不降级：拿不到就显示错误 + rid，绝不编造概率。
+ */
+const BF = { open: false, persp: 'ai', cache: {}, loading: false, err: '', rid: '', ply: -1, reqSeq: 0 };
+const BF_RANK_ORDER = ['2', 'A', 'K', 'Q', 'J', 'X', '9', '8', '7', '6', '5', '4', '3'];
+const BF_RANK_LABEL = { X: '10' };
+const BF_COPIES = { 2: 1, A: 3 };                       // 其余点数各 4 张（48 张副）
+const BF_FACT_ICON = {
+  lead_rule1: '📐', lead_rule2: '📐', lead_rule3: '📐',
+  pass: '🚫', gap: '✂️', tell: '🗣️', follow: '↩️',
+};
+
+function bfRankKey(r) { return BF_RANK_LABEL[r] || r; }
+
+/* 面板在哪些场景可用：人机(16张，深度模型会话) / 热座(无状态，当前出牌方视角) */
+function beliefAvailable() {
+  if (isDeck15()) return false;
+  if (S.mode === 'ai') return true;                     // 桥未就绪时点击会给出明确报错
+  if (S.mode === 'hotseat') return S.phase === 'playing' || S.phase === 'roundEnd';
+  return false;
+}
+function bfSyncBtn() {
+  const el = $('btn-belief');
+  if (el) el.classList.toggle('hidden', !beliefAvailable());
+}
+function bfPerspSeat(persp) { return persp === 'ai' ? 1 : 0; }
+
+/* 热座：把当前局面转成无状态 belief 请求（视角 = 当前出牌方） */
+function bfStatelessPayload() {
+  const seat = (S.awaiting != null) ? S.awaiting : S.turn;
+  const oppSeat = 1 - seat;
+  const trick = (S.last && S.last.by === oppSeat && S.last.combo) ? comboToTrick(S.last.combo) : null;
+  const history = (S.roundMoves || []).map(m => ({
+    seat: m.seat === seat ? 0 : 1,
+    move: (m.cards || []).slice(),
+    pass_on: m.pass_on || null,
+  }));
+  return { seat, payload: { my_hand: S.hands[seat].map(c => c.i).sort((a, b) => a - b),
+                            opp_n: S.hands[oppSeat].length, trick, history } };
+}
+
+async function bfCall(persp) {
+  const post = (body) => bridgeApi('/api/belief', body, 30000);
+  if (S.mode === 'ai') {
+    for (let i = 0; i < 40 && bridge.initing; i++) await new Promise(r => setTimeout(r, 200));
+    if (!bridge.ready || !bridge.sid) throw new Error(bridge.lastErr || 'AI 服务未就绪（深度模型会话未建立）');
+    return await post({ sid: bridge.sid, perspective: persp });
+  }
+  const { payload } = bfStatelessPayload();
+  return await post(payload);
+}
+
+function bfOpen() {
+  if (!beliefAvailable()) return;
+  BF.open = true;
+  BF.persp = (S.mode === 'ai') ? BF.persp : 'me';       // 热座只有一个视角
+  const sheet = $('belief-sheet');
+  sheet.classList.remove('hidden');
+  $('belief-tabs').classList.toggle('hidden', S.mode !== 'ai');
+  document.querySelectorAll('#belief-tabs .seg-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.persp === BF.persp));
+  requestAnimationFrame(() => sheet.classList.add('show'));
+  bfRefresh(true);
+  bfSyncBtn();
+}
+function bfClose() {
+  const sheet = $('belief-sheet');
+  if (!sheet || sheet.classList.contains('hidden')) return;
+  sheet.classList.remove('show');
+  const card = $('belief-card');
+  if (card) card.style.transform = '';
+  setTimeout(() => { sheet.classList.add('hidden'); BF.open = false; }, 240);
+}
+function bfKey() { return BF.persp + '#' + (S.roundMoves || []).length + '#' + (S.hands || []).map(h => h.length).join('-'); }
+
+async function bfRefresh(force) {
+  if (!BF.open) return;
+  const key = bfKey();
+  $('belief-tabs').classList.toggle('hidden', S.mode !== 'ai');
+  document.querySelectorAll('#belief-tabs .seg-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.persp === BF.persp));
+  if (!force && BF.cache[key]) { BF.loading = false; bfRender(BF.cache[key]); return; }
+  BF.loading = true; BF.err = ''; BF.keep = !force && !!BF.cache[key];
+  bfRender(null);
+  const seq = ++BF.reqSeq;
+  try {
+    const d = await bfCall(BF.persp);
+    if (seq !== BF.reqSeq || !BF.open) return;          // 期间又换了视角/关了面板 -> 丢弃
+    if (!d || d.error) throw new Error((d && d.error) || '未返回数据');
+    BF.cache[key] = d; BF.rid = d.rid || ''; BF.err = '';
+    BF.loading = false;                                 // 必须先复位：bfRender 用它判断骨架屏
+    bfRender(d);
+  } catch (e) {
+    if (seq !== BF.reqSeq || !BF.open) return;
+    BF.err = String((e && e.message) || e); BF.rid = (e && e.rid) || '';
+    BF.loading = false;
+    bfRender(null);
+  }
+}
+function bfOnPly() {                                    // 每手之后：面板开着就自动刷新
+  if (!BF.open) return;
+  setTimeout(() => { if (BF.open) bfRefresh(false); }, 350);
+}
+
+function bfMetaHTML(d) {
+  if (!d) return '';
+  const bits = [];
+  const w = Number(d.worlds || 0);
+  const v = d.view || {};
+  if (v.ply != null) bits.push('第 <b>' + v.ply + '</b> 手');
+  bits.push('可能构成 <b>' + bfNum(w) + '</b> 种');
+  if (d.exhaustive) bits.push('<span class="bf-ok">全量枚举</span>');
+  bits.push(d.weighted ? '加权' : '未加权');
+  if (d.sharpness != null) bits.push('尖度 ' + Number(d.sharpness).toFixed(4));
+  let s = bits.join(' · ');
+  const warn = [];
+  if (w > 50000) warn.push('信息不足（概率接近均匀，属正常）');
+  const lk = d.lock || {};
+  if (lk.worlds_capped) warn.push('同型牌锁牌核查已跳过（构成数过大）');
+  if (lk.leads_skipped) warn.push('领出锁牌认证已跳过（构成数过大）');
+  if (d.incomplete_snapshot) warn.push('快照不完整（动作史有缺）');
+  if (warn.length) s += '<div class="warn">⚠ ' + warn.join('；') + '</div>';
+  return s;
+}
+function bfPct(p) {
+  const v = Number(p || 0) * 100;
+  if (v > 0 && v < 0.01) return '&lt;0.01%';
+  return v.toFixed(2) + '%';
+}
+function bfNum(n) {
+  if (n >= 10000) return (n / 10000).toFixed(1) + ' 万';
+  return String(n);
+}
+
+function bfRender(d) {
+  const body = $('belief-body');
+  if (!body) return;
+  $('belief-title').textContent = '🧠 记牌猜牌';
+  const perspName = BF.persp === 'ai' ? 'AI 看我' : '我看 AI';
+  if (BF.loading) {
+    $('belief-meta').innerHTML = perspName + ' · 🤖 正在算记牌与猜牌…';
+    body.innerHTML = '<div class="bf-skel" style="width:70%"></div><div class="bf-skel" style="width:90%"></div>' +
+                     '<div class="bf-skel" style="width:55%"></div><div class="bf-skel" style="width:80%"></div>';
+    return;
+  }
+  if (BF.err) {
+    $('belief-meta').innerHTML = perspName;
+    body.innerHTML = '<div class="bf-err">⚠ 记牌猜牌不可用：' + bfEsc(BF.err) +
+      (BF.rid ? '<br><span class="dim">rid: ' + bfEsc(BF.rid) + '</span>' : '') +
+      '<br><button class="btn primary small" id="bf-retry">重试</button></div>';
+    const btn = $('bf-retry');
+    if (btn) btn.addEventListener('click', () => bfRefresh(true));
+    return;
+  }
+  if (!d) { $('belief-meta').innerHTML = ''; body.innerHTML = ''; return; }
+  const seat = BF.persp === 'me' ? '我' : 'AI';
+  const who = BF.persp === 'me' ? 'AI 的手牌' : '你的手牌';
+  $('belief-meta').innerHTML = perspName + ' · ' + bfMetaHTML(d);
+  const out = [];
+  out.push(bfSecProb(d, who, seat));
+  out.push(bfSecLedger(d, seat));
+  out.push(bfSecFacts(d, seat));
+  out.push(bfSecLock(d, seat));
+  body.innerHTML = out.join('');
+}
+
+/* ① 对手手牌概率：top_hands + rank_prob */
+function bfSecProb(d, who, seat) {
+  const rp = d.rank_prob || {}, re = d.rank_exp || {};
+  const rows = BF_RANK_ORDER.filter(r => (rp[r] || 0) > 0.0005).map(r => {
+    const p = rp[r] || 0;
+    return '<div class="bf-row" title="期望 ' + Number(re[r] || 0).toFixed(2) + ' 张">' +
+      '<span class="k">' + bfEsc(r) + '</span>' +
+      '<span class="bf-bar"><i style="width:' + Math.max(2, Math.round(p * 100)) + '%"></i></span>' +
+      '<span class="v">' + (p * 100).toFixed(1) + '%</span></div>';
+  }).join('');
+  const tops = (d.top_hands || []).slice(0, 6).map((h, i) => {
+    const p = Number(h.p || 0);
+    return '<div class="bf-row"><span class="k">' + (i + 1) + '</span>' +
+      '<span class="cards" style="flex:1;font-family:Georgia,serif;letter-spacing:1px;color:#ffe9b8">' +
+      bfEsc(h.cards || '') + '</span>' +
+      '<span class="v">' + bfPct(p) + '</span></div>';
+  }).join('');
+  return '<details class="bf-sec" open><summary>🃏 ' + who + '大概是什么' +
+    '<span class="tag">' + (d.opp_n != null ? '对手剩 ' + d.opp_n + ' 张' : '') + '</span>' +
+    '<span class="chev">▶</span></summary><div class="bf-inner">' +
+    '<p class="bf-note">点数概率 = 在所有与公开信息一致的可能手牌里，对手持有该点数 ≥1 张的比例（越高越可能）。' +
+    '下面是权重最高的几种具体构成。</p>' + (rows || '<p class="bf-note">暂无（信息不足或对手已无牌）</p>') +
+    (tops ? '<p class="bf-note" style="margin-top:10px">最可能的构成</p>' + tops : '') +
+    '</div></details>';
+}
+
+/* ② 记牌台账：各点数还没露面的张数 */
+function bfSecLedger(d, seat) {
+  const led = d.ledger || {};
+  const cells = BF_RANK_ORDER.map(r => {
+    const n = Number(led[r] || 0);
+    const cap = BF_COPIES[r] || 4;
+    let dots = '';
+    for (let i = 0; i < cap; i++) dots += '<i class="' + (i < n ? 'on' : '') + '"></i>';
+    return '<div class="bf-cell' + (n === 0 ? ' zero' : '') + '"><div class="r">' +
+      bfEsc(r) + '</div><div class="n">' + n + '/' + cap + '</div>' +
+      '<div class="dots">' + dots + '</div></div>';
+  }).join('');
+  const total = Object.values(led).reduce((a, b) => a + Number(b || 0), 0);
+  return '<details class="bf-sec" open><summary>🧮 记牌台账' +
+    '<span class="tag">未见 ' + total + ' 张</span><span class="chev">▶</span></summary>' +
+    '<div class="bf-inner"><p class="bf-note">各点数“还没露面”的张数（牌堆总量 − 我手牌 − 双方已出）。' +
+    '点亮的圆点 = 还剩几张。' + seat + '视角下这就是' + (BF.persp === 'me' ? 'AI' : '你') + '还能拿到的牌池。</p>' +
+    '<div class="bf-grid">' + cells + '</div></div></details>';
+}
+
+/* ③ 推断链：facts（每条带实测命中率） */
+function bfSecFacts(d, seat) {
+  const facts = d.facts || [];
+  const whoTxt = BF.persp === 'me' ? 'AI' : '你';
+  const items = facts.map(f => {
+    const text = String(f.text || '');
+    const m = text.match(/实测命中\s*(\d+)%/);
+    let main = text;
+    let pill = '';
+    if (m) {
+      const v = +m[1];
+      main = text.replace(/\s*\(?实测命中\s*\d+%\)?/, '').trim();
+      pill = '<span class="bf-pill' + (v < 80 ? ' low' : '') + '">命中 ' + v + '%</span>';
+    }
+    const rule = text.match(/用户规则([①②③④])/);
+    if (rule) {
+      main = main.replace(/\s*\(?用户规则[①②③④][^)]*\)?/, '').trim();
+      pill += '<span class="bf-pill rule">规则' + rule[1] + '</span>';
+    }
+    const icon = BF_ICON_SAFE(f.kind);
+    return '<div class="bf-fact"><span class="ico">' + icon + '</span><span class="txt">' +
+      bfEsc(main) + pill + '</span></div>';
+  }).join('');
+  return '<details class="bf-sec"' + (facts.length ? ' open' : '') + '><summary>🔍 推断链' +
+    '<span class="tag">' + facts.length + ' 条</span><span class="chev">▶</span></summary>' +
+    '<div class="bf-inner"><p class="bf-note">这些是模型从' + whoTxt + '的出牌动作推出的事实，' +
+    '每条都带实测命中率（可逐条校验该不该信）。</p>' +
+    (items || '<p class="bf-note">暂无推断（动作还不够多）</p>') + '</div></details>';
+}
+function BF_ICON_SAFE(kind) { return BF_FACT_ICON[kind] || '•'; }
+
+/* ④ 锁牌认证 */
+function bfSecLock(d, seat) {
+  const lk = d.lock || {};
+  const vt = lk.vs_trick;
+  const isAI = BF.persp === 'ai';
+  const oppTxt = isAI ? '你' : 'AI';
+  let html = '';
+  if (vt && vt.p_beat != null) {
+    // 语义说明：p_beat = 在"对手手牌"的全部可能世界里，能压住该同型牌型的权重占比。
+    // 所以这里说"同型牌核查"，而不是"你能不能压住自己刚出的牌"。
+    html += '<p class="bf-note">同型牌核查：' + oppTxt + '手里还能压住这手同型牌的概率 <b>' +
+      (vt.p_beat * 100).toFixed(2) + '%</b>' +
+      (vt.certified_locked ? ' <span class="bf-ok">已认证：同型牌必压不住（保牌权）</span>' : '') + '</p>';
+  } else if (vt && vt.skipped) {
+    html += '<p class="bf-note">' + bfEsc(vt.skipped) + '</p>';
+  } else {
+    html += '<p class="bf-note">当前无需跟牌（或不在' + seat + '的回合）。</p>';
+  }
+  const leads = lk.leads || [];
+  if (leads.length) {
+    html += '<p class="bf-note" style="margin-top:8px">被认证“对方必压不住”的领出（按点数，同点任意花色）：</p><div class="bf-chips">' +
+      leads.map(l => '<span class="bf-chip">' + bfEsc(l.cards || '') + '</span>').join('') + '</div>';
+  } else if (lk.leads_skipped) {
+    html += '<p class="bf-note" style="margin-top:8px">' + bfEsc(lk.leads_skipped) + '</p>';
+  } else {
+    html += '<p class="bf-note" style="margin-top:8px">暂无被认证的领出（残局构成数很小时才会严格认证）。</p>';
+  }
+  return '<details class="bf-sec"' + (leads.length || (vt && vt.certified_locked) ? ' open' : '') +
+    '><summary>🔒 锁牌认证<span class="tag">' + leads.length + ' 手</span>' +
+    '<span class="chev">▶</span></summary><div class="bf-inner">' +
+    '<p class="bf-note">“锁牌”= 在全部可能手牌上严格枚举后，对方没有任何牌能压住 —— 所以敢连着领出保牌权。</p>' +
+    html + '</div></details>';
+}
+
+function bfEsc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+/* 抽屉交互：下拉关闭 / 遮罩关闭 / ESC / 切视角 / 刷新 */
+function bfInitSheet() {
+  const sheet = $('belief-sheet'), card = $('belief-card'), grip = $('belief-grip');
+  if (!sheet) return;
+  $('btn-belief').addEventListener('click', bfOpen);
+  $('belief-close').addEventListener('click', bfClose);
+  $('belief-mask').addEventListener('click', bfClose);
+  $('belief-refresh').addEventListener('click', () => bfRefresh(true));
+  document.querySelectorAll('#belief-tabs .seg-btn').forEach(b => {
+    b.addEventListener('click', () => { BF.persp = b.dataset.persp; bfRefresh(false); });
+  });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && BF.open) bfClose(); });
+  let sy = 0, dy = 0, dragging = false;
+  const start = e => {
+    dragging = true; sy = (e.touches ? e.touches[0].clientY : e.clientY);
+    dy = 0; card.style.transition = 'none';
+  };
+  const move = e => {
+    if (!dragging) return;
+    dy = Math.max(0, (e.touches ? e.touches[0].clientY : e.clientY) - sy);
+    card.style.transform = 'translateY(' + dy + 'px)';
+  };
+  const end = () => {
+    if (!dragging) return;
+    dragging = false; card.style.transition = '';
+    if (dy > 90) bfClose(); else card.style.transform = '';
+  };
+  [grip, document.querySelector('.sheet-head')].forEach(el => {
+    if (!el) return;
+    el.addEventListener('touchstart', start, { passive: true });
+    el.addEventListener('touchmove', move, { passive: true });
+    el.addEventListener('touchend', end);
+    el.addEventListener('mousedown', start);
+  });
+  document.addEventListener('mousemove', move);
+  document.addEventListener('mouseup', end);
 }
 
 /* ================= 初始化 ================= */
@@ -2264,6 +2591,7 @@ function init() {
   $('btn-play').addEventListener('click', humanPlay);
   $('btn-pass').addEventListener('click', humanPass);
   $('btn-hint').addEventListener('click', showHint);
+  bfInitSheet();                                        // 记牌猜牌抽屉（移动端底部面板）
   $('btn-adopt').addEventListener('click', humanPlay);
   $('btn-handover-ok').addEventListener('click', confirmHandover);
   $('btn-next').addEventListener('click', () => {
