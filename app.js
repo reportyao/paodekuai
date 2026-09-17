@@ -1447,8 +1447,11 @@ const RV_SUIT = '♠♥♣♦';
 function rvCardText(ids) { return (ids || []).map(c => RV_SUIT[c & 3] + RV_RANK[c >> 2]).join(' '); }
 
 let HS_SCOPE = 'mine';                                  // mine=我的对局(A/H)  api=对外调用(E)
+let HS_LIMIT = 50;                                      // 列表默认只拉最新 50 条（手机端少下 7 倍数据）
+let HS_TOTAL = 0;
 
 async function showReplayHistory(scope) {
+  if (scope && scope !== HS_SCOPE) { HS_SCOPE = scope; HS_LIMIT = 50; }
   if (scope) HS_SCOPE = scope;
   const box = $('history-list');
   const sbox = $('history-stats');
@@ -1458,14 +1461,17 @@ async function showReplayHistory(scope) {
   $('hs-mine').classList.toggle('active', HS_SCOPE === 'mine');
   $('hs-api').classList.toggle('active', HS_SCOPE === 'api');
   try {
-    const r = await fetch('/replays/list?scope=' + HS_SCOPE).then(x => x.json());
+    const r = await fetch('/replays/list?scope=' + HS_SCOPE + '&limit=' + HS_LIMIT).then(x => x.json());
+    HS_TOTAL = (r && (r.total != null ? r.total : (r.games || []).length)) || 0;
     const games = (r && r.games) || [];
     // 统计条：对外场次看调用方胜负，我的场次看我的胜负与点评数
     try {
       const st = await fetch('/replays/stats?scope=' + HS_SCOPE).then(x => x.json());
       if (sbox && st && st.summary) {
+        // 与列表口径一致：列表默认只显示最新 HS_LIMIT 条，这里标注清楚
+        if (HS_TOTAL) st.summary.shown_note = '已显示 ' + Math.min(HS_LIMIT, HS_TOTAL) + '/' + HS_TOTAL + ' 局';
         const a = st.summary;
-        const parts = [`共 <b>${a.games}</b> 局`];
+        const parts = [a.shown_note ? `📄 ${a.shown_note}` : '', `共 <b>${a.games}</b> 局`].filter(Boolean);
         if (a.finished) parts.push(`已完成 <b>${a.finished}</b>`);
         if (a.live) parts.push(`进行中 <b>${a.live}</b>`);
         if (a.finished) {
@@ -1500,6 +1506,16 @@ async function showReplayHistory(scope) {
       </div>`).join('');
     box.querySelectorAll('.rv-row').forEach(el =>
       el.addEventListener('click', () => openReview(el.dataset.no, el.dataset.sid)));
+    // 只加载最新 N 条：还有更早的局时给一个"加载更多"（每次 +50）
+    if (HS_TOTAL > games.length) {
+      const more = document.createElement('button');
+      more.className = 'btn ghost small';
+      more.id = 'hs-more';
+      more.textContent = '加载更多（已显示 ' + games.length + ' / 共 ' + HS_TOTAL + ' 局）';
+      more.style.marginTop = '10px';
+      more.addEventListener('click', () => { HS_LIMIT += 50; showReplayHistory(); });
+      box.appendChild(more);
+    }
   } catch (e) {
     loadReplayArchive();
     box.innerHTML = S.replayArchive.length
@@ -1510,7 +1526,7 @@ async function showReplayHistory(scope) {
 }
 async function exportAllReplays() {
   try {
-    const r = await fetch('/replays/list').then(x => x.json());
+    const r = await fetch('/replays/list?limit=all').then(x => x.json());   // 导出必须全量
     const all = [];
     for (const g of (r.games || [])) {
       const d = await fetch('/replays/get?no=' + encodeURIComponent(g.no)).then(x => x.json());
@@ -1661,7 +1677,7 @@ async function reviewPreviousGame() {
   if (!no) {
     // 没打过上一局 -> 取最近一局已结束的对局
     try {
-      const r = await fetch('/replays/list').then(x => x.json());
+      const r = await fetch('/replays/list?limit=200').then(x => x.json());
       const done = (r.games || []).filter(g => !g.live && g.no !== S.currentNo);
       if (done.length) { no = done[0].no; sid = done[0]._file; }
     } catch {}

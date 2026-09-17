@@ -128,13 +128,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if u.path == "/replays/list":
                 scope = (q.get("scope") or ["mine"])[0]
                 show_all = (q.get("all") or ["0"])[0] in ("1", "true", "yes")   # all=1 时连未成局也列出来
+                # 默认只返回最新 50 条：以前全量 360KB，手机端打开要好几秒
+                lim_raw = (q.get("limit") or ["50"])[0]
+                limit = None if str(lim_raw).lower() in ("all", "0", "-1") else max(1, int(lim_raw or 50))
                 cidx = replay_report.comments_index()
                 games = []
-                for d in replay_report.load_games():
+                for d in replay_report.load_summaries():
                     # 复盘只列"真正打完/正在进行"的局：空局（一手未打）与中途退出（无胜负）默认不出现，
                     # 否则列表里全是没意义的碎片（历史遗留已清理到 data/_trash_*，此处防止再生）。
                     if not show_all:
-                        _mv = len(d.get("moves") or d.get("codes") or [])
+                        _mv = replay_report.moves_count(d)   # 摘要里是 moves_n（不含逐手明细）
                         if _mv == 0:
                             continue
                         if not d.get("live") and d.get("winner") is None:
@@ -151,7 +154,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "no": no, "time": replay_report.time_of(d),
                         "kind": replay_report.kind_of(d), "tag": tag,
                         "participants": replay_report.participants(d),
-                        "moves": len(d.get("moves", d.get("codes", []))),
+                        "moves": replay_report.moves_count(d),
                         "comments": cidx.get(no, 0),
                         "result": replay_report.result_of(d),
                         "live": bool(d.get("live")),
@@ -164,13 +167,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "duration": d.get("durationSec"),
                         "scope": "api" if is_api else "mine",
                     })
-                return {"games": games}
+                total = len(games)
+                if limit is not None:
+                    games = games[:limit]
+                return {"games": games, "total": total, "limit": (limit if limit is not None else total),
+                        "shown": len(games), "scope": scope}
 
             if u.path == "/replays/stats":
                 # 管理后台用的胜负汇总（含按调用方/按天分组）
                 scope = (q.get("scope") or ["mine"])[0]
                 games = []
-                for d in replay_report.load_games():
+                for d in replay_report.load_summaries():
                     is_api = bool(d.get("api") or d.get("_prefix") == "E")
                     if scope == "mine" and is_api:
                         continue

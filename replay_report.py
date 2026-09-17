@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
+import threading
 import sys
 from pathlib import Path
 
@@ -155,6 +157,100 @@ def load_games(prefix_filter: str | None = None) -> list[dict]:
     # 排序键必须确定：早期只用 ts（秒级），同一秒创建的两局会并列 -> 顺序随 glob 抖动，
     # 复盘"按编号找局"就会随机取到其中一局（线上重号 A1179 那次就取错了局）。
     return sorted(out, key=lambda d: (d["_epoch"], d["_mtime"], d["_file"]), reverse=True)
+
+
+INDEX_PATH = BASE / "data" / "_replay_index.json"
+_INDEX = {"rows": {}}
+_INDEX_LOCK = threading.Lock()
+_IDS_DONE = False
+
+# 摘要里要保留的字段：够列表/统计用（不含逐手 moves，那才是慢的根源）
+_SUMMARY_KEYS = ("no", "live", "aborted", "winner", "api", "caller", "source", "names",
+                 "scores", "durationSec", "result", "timeText", "ts", "humanSeat",
+                 "leader", "opts")
+
+
+def _summary_of(d: dict, path, prefix: str, st) -> dict:
+    row = {"file": path.name, "_path": str(path), "_prefix": prefix,
+           "_mtime": st.st_mtime, "_size": st.st_size,
+           "_epoch": _epoch(d, st.st_mtime),
+           "sid": str(d.get("sid") or path.stem),
+           # 手数以计数形式保存（摘要不保留逐手明细）
+           "moves_n": len(d.get("moves") or d.get("codes") or [])}
+    for k in _SUMMARY_KEYS:
+        if k in d:
+            row[k] = d[k]
+    return row
+
+
+def _load_index_file() -> dict:
+    try:
+        d = json.loads(INDEX_PATH.read_text(encoding="utf-8"))
+        return d.get("rows") or {}
+    except Exception:
+        return {}
+
+
+def _save_index(rows: dict) -> None:
+    """原子写（先写临时文件再改名），避免读端拿到半截索引。"""
+    try:
+        INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = INDEX_PATH.with_name(INDEX_PATH.name + ".tmp")
+        tmp.write_text(json.dumps({"v": 1, "rows": rows}, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, INDEX_PATH)
+    except OSError:
+        pass
+
+
+_INDEX["rows"] = _load_index_file()
+
+
+def load_summaries(refresh: bool = True) -> list[dict]:
+    """轻量对局列表（新→旧）：只解析**新增/改动**的文件，其余直接用索引缓存。
+
+    列表与统计只需要每局摘要（编号/时间/胜负/手数/点评数…）。以前每次都把 data/replays
+    里 7MB 牌谱（含每一手的明细）全量解析一遍，列表打开要 260ms+ 且响应 360KB；
+    现在首次建索引后按 mtime+size 增量更新，列表默认只返回最新 50 条。
+    """
+    global _IDS_DONE
+    with _INDEX_LOCK:
+        if refresh and not _IDS_DONE:
+            ensure_ids()          # 旧文件补编号只需做一次（每请求都做=每次全量解析）
+            _IDS_DONE = True
+        rows = _INDEX["rows"]
+        seen = set()
+        for d, prefix in DIRS:
+            if not d.exists():
+                continue
+            for p in d.glob("*.json"):
+                try:
+                    st = p.stat()
+                except OSError:
+                    continue
+                key = f"{prefix}:{p.name}"
+                seen.add(key)
+                cur = rows.get(key)
+                if cur and cur.get("_mtime") == st.st_mtime and cur.get("_size") == st.st_size:
+                    continue
+                try:
+                    dd = json.loads(p.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                rows[key] = _summary_of(dd, p, prefix, st)
+        for k in [k for k in rows if k not in seen]:
+            rows.pop(k, None)
+        if refresh:
+            _save_index(rows)
+    return sorted(rows.values(),
+                  key=lambda r: (r.get("_epoch", 0), r.get("_mtime", 0), r.get("file", "")),
+                  reverse=True)
+
+
+def moves_count(g: dict) -> int:
+    """摘要用 moves_n；完整对局用 moves/codes 的长度。"""
+    if isinstance(g.get("moves_n"), int):
+        return int(g["moves_n"])
+    return len(g.get("moves") or g.get("codes") or [])
 
 
 def find_by_id(gid: str, sid: str = "") -> dict | None:
@@ -313,8 +409,7 @@ def stats_of(games: list) -> dict:
                 continue
             b["finished"] += 1
             b["seat0_wins" if g.get("winner") == 0 else "seat1_wins"] += 1
-            mv = len(g.get("moves") or g.get("codes") or [])
-            b["moves"] += mv
+            b["moves"] += moves_count(g)
             if g.get("durationSec"):
                 b["dur_sum"] += float(g["durationSec"])
                 b["dur_n"] += 1
