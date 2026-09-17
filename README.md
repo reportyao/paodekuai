@@ -144,6 +144,23 @@ ls -t /home/ubuntu/paodekuai/data/replays/*.json | head   # 最新对局
 python3 -m json.tool "$(ls -t /home/ubuntu/paodekuai/data/replays/*.json | head -1)"
 ```
 
+## 性能与资源优先级（线上 2 核机器）
+
+线上 CVM 是 **S5.MEDIUM4（2 vCPU / 4GB，机型名里的 4 是内存不是核数）**，同机还跑着掼蛋/跑胡子/在线对战等项目，
+2 核是共享的。实测与已做的"零决策影响"优化：
+
+| 优化 | 效果（实测） | 是否影响决策 |
+|---|---|---|
+| 推理线程数固定 1（`ai_bridge` 启动即设 `OMP/MKL_NUM_THREADS=1` + `torch.set_num_threads(1)`） | 同 25 个真实决策点 455ms -> **345ms（-24%）** | 否，**25/25 决策一致**（单线程更确定） |
+| 前端 AI 出手节拍 `600+rand(500)` -> `150+rand(150)` | 每手省 **0.45~0.8s** 纯等待 | 否（与模型无关） |
+| AI 实例 CPU 权重 `CPUWeight=10000`（上限；drop-in `/etc/systemd/system/paodekuai-ai.service.d/cpu.conf`） | 有争抢时：轻手 61->42ms（**+31%**）、重手 697->638ms（**+8%**）；空载无差别 | 否，**10/10 决策一致**（只改调度） |
+
+- 回退权重：把 drop-in 里的 `CPUWeight` 改回 `1000`（或 `sudo systemctl set-property paodekuai-ai CPUWeight=1000`）后 `daemon-reload`；
+  对外 API 实例（`paodekuai-api`）刻意保持 `CPUWeight=100` 低优先级，不与自己对局抢算力。
+- 重手（开局多种子搜索/残局穷举，max 曾到 2.0s）**本质是单核算力 + 两核共享**；把 2 核升到 4 核（同代 `S5.LARGE8`）
+  是唯一"零决策影响且直接打在瓶颈上"的手段（未执行，待定）。
+- 自检面板可直接看到这些：组件探针含 `threads`（自证 torch_threads=1），`prod_agent.kw` 列出当前生效的生产配方。
+
 ## 对局记录 / 复盘（网页内查看 + 人工点评）
 
 **网页里**：大厅点「📚 对局记录」→ 服务器对局列表（每局**唯一编号** A=人机 / H=真人 + 时间 + 参与 + 手数 + 结果）；
