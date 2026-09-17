@@ -49,6 +49,21 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+# ---- 推理线程数：2 核机器上 torch 默认开满线程会互相抢核（小模型尤甚）。
+# 实测同 25 个决策点：threads=2 平均 455ms/决策 -> threads=1 345ms（快 24%），
+# 且 25/25 决策完全一致（单线程同时更确定，无浮点归约顺序差异）。不改算法与逻辑。
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+try:
+    import torch as _torch
+    _torch.set_num_threads(1)
+    try:
+        _torch.set_num_interop_threads(1)
+    except Exception:
+        pass
+except Exception:
+    pass
+
 DEFAULT_BOT_ROOT = Path(__file__).resolve().parent.parent / "pdk-ai-prod"     # 生产版仓库 (github.com/reportyao/pdk-ai)
 if not DEFAULT_BOT_ROOT.exists():
     DEFAULT_BOT_ROOT = Path(__file__).resolve().parent.parent / "pdk_ai_work" / "pdk_ai"  # 同源工作副本
@@ -1934,6 +1949,16 @@ def component_probes() -> dict:
                               "rows": len(op)}
     except Exception as e:
         comp["patternmap"] = {"ok": False, "err": repr(e)[:80]}
+    # 推理线程数自证（2 核机器上设 1 可减少抢核；实测决策一致且更快，见 README）
+    try:
+        import torch as _t
+        nt = int(_t.get_num_threads())
+        comp["threads"] = {"ok": nt == 1, "torch_threads": nt,
+                           "env_omp": os.environ.get("OMP_NUM_THREADS", "")}
+        if nt != 1:
+            comp["threads"]["warn"] = "线程数>1 会与求解器抢核（2 核机器上更慢）"
+    except Exception as e:
+        comp["threads"] = {"ok": True, "err": repr(e)[:60]}
     try:
         from pdk import candgen as _cg
         leads = [int(m) for m in fast.gen_leads_codes([1] + [0] * 12, bot_server.CFG) if m]

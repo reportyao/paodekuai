@@ -1234,14 +1234,14 @@ function beginTurn() {
     if (S.mode === 'ai' && S.aiBlocked) return;           // 暂停中：不自动行动
     const startAI = () => {
       if (S.mode === 'ai' && isDeck15()) {                // 15张：简易 AI（本地），不依赖桥
-        S.aiTimer = setTimeout(aiMove, 600 + randInt(500));
+        S.aiTimer = setTimeout(aiMove, 150 + randInt(150));   // 只保留看得见的节拍，不再白等 0.6~1.1s（不影响决策）
         return;
       }
       if (S.mode === 'ai' && !bridge.ready) {             // 不降级：桥不可用 -> 报错暂停
         aiError(bridge.lastErr || 'AI 服务未连接（生产模型不可用）');
         return;
       }
-      S.aiTimer = setTimeout(aiMove, 600 + randInt(500));
+      S.aiTimer = setTimeout(aiMove, 150 + randInt(150));   // 同上：去掉 0.6~1.1s 纯等待
     };
     if (S.mode === 'ai' && !isDeck15() && bridge.initing) bridge.waiters.push(startAI);  // 等桥初始化完成，消除先手竞态
     else startAI();
