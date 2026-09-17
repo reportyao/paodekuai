@@ -1910,12 +1910,38 @@ def component_probes() -> dict:
     try:
         agent, mode, _ = build_prod_agent("hybrid")
         kw = prod_solver_kw()
+        # 配方键全量显示：上游会随版本调整生产配方（如 e037b99 新增 opening_seeds/opening_margin），
+        # 自检面板要能一眼看出"线上到底跑的是哪套配方"，所以不再白名单过滤。
         comp["prod_agent"] = {"ok": True, "mode": mode,
-                              "kw": {k: v for k, v in kw.items()
-                                     if k in ("engine", "num_threshold",
-                                              "exact_worlds_total", "node_cap")}}
+                              "kw": {k: v for k, v in kw.items()}}
     except Exception as e:
         comp["prod_agent"] = {"ok": False, "err": repr(e)[:80]}
+    # 新增组件探针（e037b99 起的推理融合链路）：推理引擎 / 牌型地图 / 合理枚举闸门
+    try:
+        st_probe = bot_server._replay_decide_history(
+            [44], 1, [], build_cfg({}), choice_alpha=0.4)
+        rs = st_probe.get("reasoner")
+        comp["reasoning"] = {"ok": rs is not None,
+                             "kinds": "L1/L2/B1-B7"}
+        if rs is None:
+            comp["reasoning"]["warn"] = "推理引擎未构建（推理链字段会为空）"
+    except Exception as e:
+        comp["reasoning"] = {"ok": False, "err": repr(e)[:80]}
+    try:
+        from pdk import patternmap as _pm
+        op = _pm.opp_patterns([[1] + [0] * 12], [1.0], [0] * 13)
+        comp["patternmap"] = {"ok": isinstance(op, list) and len(op) > 0,
+                              "rows": len(op)}
+    except Exception as e:
+        comp["patternmap"] = {"ok": False, "err": repr(e)[:80]}
+    try:
+        from pdk import candgen as _cg
+        leads = [int(m) for m in fast.gen_leads_codes([1] + [0] * 12, bot_server.CFG) if m]
+        ok_rows = _cg.filter_reasonable(leads, [1] + [0] * 12, bot_server.CFG,
+                                        max_per_type=2, budget=10)
+        comp["candgen"] = {"ok": len(ok_rows) > 0, "kept": len(ok_rows), "of": len(leads)}
+    except Exception as e:
+        comp["candgen"] = {"ok": False, "err": repr(e)[:80]}
     return comp
 
 
@@ -1987,10 +2013,81 @@ def run_selftest() -> dict:
             return {"check": "错误契约（400 + type + rid）"}
         raise AssertionError("空手牌未被拒绝")
 
+    # 场景 5: 推理链 + 新字段契约（e037b99 起：记牌 x 世界推理融合）
+    def s_belief_fields():
+        payload = {"my_hand": [2, 13, 19, 21, 24, 27, 29, 39, 42, 44], "opp_n": 3,
+                   "trick": [0, 2, 1, 0],
+                   "history": [{"seat": 0, "move": [1, 3, 4, 5]},
+                               {"seat": 1, "move": [6, 7, 8, 9]},
+                               {"seat": 0, "move": [16, 18, 20, 23]},
+                               {"seat": 1, "move": []}]}
+        out = _belief_core(payload, build_cfg({}))
+        need = ("inferences", "controls", "opp_patterns", "worlds_detail",
+                "candidates", "rank_cnt_p", "top_hands", "lock")
+        miss = [k for k in need if k not in out]
+        if miss:
+            raise AssertionError(f"新字段缺失: {miss}")
+        wd = out.get("worlds_detail") or {}
+        if not (wd.get("cands") and wd.get("worlds")):
+            raise AssertionError("worlds_detail 为空（世界推演链路异常）")
+        if not isinstance(out.get("opp_patterns"), list) or not out["opp_patterns"]:
+            raise AssertionError("opp_patterns 为空（牌型地图链路异常）")
+        if not isinstance(out.get("controls"), list) or not out.get("controls"):
+            raise AssertionError("controls 为空（牌型归属链路异常）")
+        rcp = out.get("rank_cnt_p") or {}
+        bad = [k for k, v in rcp.items() if abs(sum(float(x) for x in v.values()) - 1.0) > 0.02]
+        if bad:
+            raise AssertionError(f"张数分布概率和不为 1: {bad[:3]}")
+        return {"check": "新字段契约（推理链/牌型地图/归属/世界推演/张数分布）",
+                "worlds": out.get("worlds"), "patterns": len(out["opp_patterns"]),
+                "controls": len(out["controls"])}
+
+    # 场景 6: 推理链非空且含确定类（L1 台账 / L2 过牌硬推理）
+    def s_reasoning():
+        payload = {"my_hand": [2, 13, 19, 21, 24, 27, 29, 39, 42, 44], "opp_n": 3,
+                   "trick": [0, 2, 1, 0],
+                   "history": [{"seat": 0, "move": [1, 3, 4, 5]},
+                               {"seat": 1, "move": [6, 7, 8, 9]},
+                               {"seat": 0, "move": [16, 18, 20, 23]},
+                               {"seat": 1, "move": []}]}
+        out = _belief_core(payload, build_cfg({}))
+        inf = out.get("inferences") or []
+        if not inf:
+            raise AssertionError("推理链为空（推理引擎链路异常）")
+        sure = [x for x in inf if str(x.get("kind", "")).upper() in ("L1", "L2")]
+        if not sure:
+            raise AssertionError("推理链缺少确定类结论（L1/L2）")
+        for x in inf:
+            if not x.get("text") or "kind" not in x:
+                raise AssertionError(f"推理链条目结构异常: {x}")
+        return {"check": "推理链（台账/过牌硬推理/行为层）", "n": len(inf),
+                "sure": len(sure), "sample": str(inf[0].get("text"))[:60]}
+
+    # 场景 7: 合理枚举闸门（candgen）——三带只留合理带法、按牌型家族分配额度
+    def s_candgen():
+        from pdk import candgen as _cg
+        my_cnt = [0] * 13
+        for r in (0, 1, 2, 11):          # 3 3 3 A：三带家族的"不合理带法"应被剔除
+            my_cnt[r] += 1 if r != 0 else 3
+        legal = [int(m) for m in fast.gen_leads_codes(my_cnt, bot_server.CFG) if m]
+        if not legal:
+            raise AssertionError("该手牌没有合法领出（构造错误）")
+        kept = _cg.filter_reasonable(legal, my_cnt, bot_server.CFG,
+                                     max_per_type=2, budget=10)
+        if not kept:
+            raise AssertionError("合理枚举闸门把候选筛空了")
+        if not set(kept) <= set(legal):
+            raise AssertionError("闸门返回了非法候选")
+        return {"check": "合理枚举闸门（三带合理带法 + 家族额度）",
+                "kept": len(kept), "of": len(legal)}
+
     case("decide_schema", s_lead)
     case("a0519_top", s_a0519)
     case("must_beat", s_must_beat)
     case("error_contract", s_bad)
+    case("belief_fields", s_belief_fields)
+    case("reasoning_chain", s_reasoning)
+    case("candgen_gate", s_candgen)
     return {"ok": all(x["ok"] for x in results), "cases": results,
             "hint": "任一 case 失败 => 对应链路异常；先看 /health 的 components，"
                     "再按 rid 查 data/api_log/<日期>.jsonl"}

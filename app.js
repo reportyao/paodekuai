@@ -525,6 +525,13 @@ const SELFTEST_CN = {
   a0519_top: '顶牌链路（记牌→穷举→数值计分）',
   must_beat: '有牌必压链路',
   error_contract: '错误契约（400 + 类型 + rid）',
+  belief_fields: '新字段契约（推理链/牌型地图/归属/世界推演/张数分布）',
+  reasoning_chain: '推理链（台账 L1 / 过牌硬推理 L2 / 行为层 B1-B7）',
+  candgen_gate: '合理枚举闸门（三带合理带法 + 牌型家族额度）',
+};
+const SELFTEST_COMP_CN = {
+  c_core: 'C 求解核心', fallback_net: '生产网络', prod_agent: '生产智能体',
+  reasoning: '推理引擎', patternmap: '牌型地图', candgen: '合理枚举闸门',
 };
 async function runSelftest() {
   const box = $('selftest-box');
@@ -539,13 +546,17 @@ async function runSelftest() {
     const comp = (hd && hd.components) || {};
     const bits = [];
     const compBits = Object.entries(comp).map(([k, v]) =>
-      `${v.ok ? '✅' : '❌'} ${{ c_core: 'C 求解核心', fallback_net: '生产网络', prod_agent: '生产智能体' }[k] || k}`);
+      `${v.ok ? '✅' : '❌'} ${SELFTEST_COMP_CN[k] || k}` +
+      (v.rows ? `(${v.rows} 类)` : v.kept != null ? `(${v.kept}/${v.of})` : ''));
     bits.push(`<div class="st-line">组件：${compBits.join('　') || '<span class="dim">不可用</span>'}</div>`);
     if (hd && hd.pdkCommit && hd.pdkCommit.hash)
       bits.push(`<div class="st-line dim">内核版本 ${esc(hd.pdkCommit.hash)} ｜ 引擎 ${((hd.productionConfig || {}).engine || '?')} ｜ 残局穷举 ≤${((hd.productionConfig || {}).exactWorldsTotal) || 0} 张</div>`);
     if (st && st.cases) {
-      bits.push(...st.cases.map(c =>
-        `<div class="st-line">${c.ok ? '✅' : '❌'} ${esc(SELFTEST_CN[c.name] || c.name)} <span class="dim">${c.ms}ms${c.ok ? '' : ' — ' + esc(String(c.err || '').slice(0, 90))}</span></div>`));
+      bits.push(...st.cases.map(c => {
+        const extra = c.check ? ' — ' + esc(String(c.check)) : '';
+        return `<div class="st-line">${c.ok ? '✅' : '❌'} ${esc(SELFTEST_CN[c.name] || c.name)} ` +
+          `<span class="dim">${c.ms}ms${extra}${c.ok ? '' : ' — ' + esc(String(c.err || '').slice(0, 90))}</span></div>`;
+      }));
       bits.push(`<div class="st-line ${st.ok ? 'st-ok' : 'st-bad'}">${st.ok ? '🎉 链路自检全部通过：AI 各组件都在真实运作' : '⚠️ 有链路异常：请把上面的失败项与 rid 报给服务方'}</div>`);
     } else {
       bits.push('<div class="st-line st-bad">❌ 自检接口不可达（AI 服务未连接？）</div>');

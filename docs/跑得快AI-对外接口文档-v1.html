@@ -468,7 +468,7 @@ SUIT_CN = "♠♥♣♦"
 <li><b>不要高频轮询</b> <code>/v1/state</code>：整局对局的每次 <code>/v1/play</code> 已返回完整快照，<code>/v1/state</code> 只用于断线恢复。</li>
 </ol>
 <ol>
-<li><b>上线自检</b>：<code>GET /v1/health</code> 应返回 <code>netProbe.net = "a2c-final56(56x)"</code>；用 §2.3 的测试向量核对你的牌型实现。</li>
+<li><b>上线自检</b>：<code>GET /v1/health</code> 应返回 <code>netProbe.net = "a2c-final56(56x)"</code>；<code>POST /v1/selftest</code> 会跑金丝雀（7 条：决策/顶牌/必压/错误契约 + 新字段契约/推理链/合理枚举闸门），返回 <code>cases[]</code>（每条含 <code>name/ok/ms/check|err</code>）与 <code>ok</code> 总判，可直接接进你们的 CI；<code>GET /v1/health</code> 的 <code>components</code> 是 6 个组件探针（C 核心/网络/智能体/推理引擎/牌型地图/枚举闸门），<code>prod_agent.kw</code> 会列出<b>当前生效的生产配方</b>（如 <code>opening_seeds</code>/<code>bomb_only_when_forced</code>），便于核对版本；用 §2.3 的测试向量核对你的牌型实现。</li>
 </ol>
 <hr>
 <h2 id="h22">5. 版本与兼容</h2>

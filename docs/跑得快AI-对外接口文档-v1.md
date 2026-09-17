@@ -450,7 +450,7 @@ SUIT_CN = "♠♥♣♦"
 4. **决策带随机性**：残局 PIMC 与开局搜索含世界采样，同一局面多次调用可能给出不同但同样合理的选择（设计特性，用于覆盖不确定性）。
 5. **保留版本信息**：把 `/v1/health` 的 `pdkCommit.hash` 记入日志；内核版本更新会滚动生效，`/v1/*` 契约向后兼容。
 6. **不要高频轮询** `/v1/state`：整局对局的每次 `/v1/play` 已返回完整快照，`/v1/state` 只用于断线恢复。
-7. **上线自检**：`GET /v1/health` 应返回 `netProbe.net = "a2c-final56(56x)"`；用 §2.3 的测试向量核对你的牌型实现。
+7. **上线自检**：`GET /v1/health` 应返回 `netProbe.net = "a2c-final56(56x)"`；`POST /v1/selftest` 会跑金丝雀（7 条：决策/顶牌/必压/错误契约 + 新字段契约/推理链/合理枚举闸门），返回 `cases[]`（每条含 `name/ok/ms/check|err`）与 `ok` 总判，可直接接进你们的 CI；`GET /v1/health` 的 `components` 是 6 个组件探针（C 核心/网络/智能体/推理引擎/牌型地图/枚举闸门），`prod_agent.kw` 会列出**当前生效的生产配方**（如 `opening_seeds`/`bomb_only_when_forced`），便于核对版本；用 §2.3 的测试向量核对你的牌型实现。
 
 ---
 
