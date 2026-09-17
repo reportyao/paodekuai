@@ -968,6 +968,131 @@ def _belief_core(payload: dict, cfg) -> dict:
                     lock["leads"].append({"cards": cards, "ptype": int(pm.ptype)})
                     if len(lock["leads"]) >= 8:
                         break
+    # ---- 牌型归属（当前最大单张/对子/三条/连对/顺子各在谁手里）----
+    controls = None
+    try:
+        from pdk.agents import SolverAgent as _SA
+        from pdk.core import PType as _PT
+        _ag2 = _SA(bot_server._QFB(), cfg, **prod_solver_kw())
+        _ag2.new_game(0, my_cnt, [0] * N_RANKS)
+        _ag2._played = [list(st["played_me"]), list(st["played_opp"])]
+        _cg2 = fast.CGame(my_cnt, [0] * N_RANKS, 0, cfg)
+        for _r in range(N_RANKS):
+            _cg2.g.played[0][_r] = st["played_me"][_r]
+            _cg2.g.played[1][_r] = st["played_opp"][_r]
+        _pc = _ag2._pattern_controls(_cg2)
+        _NM = {"0": "单张", "1": "对子", "3": "三条", "4": "三带二", "8": "炸弹"}
+        controls = []
+        for _k, _v in _pc.items():
+            _mine, _theirs, _hold = _v
+            if isinstance(_k, tuple):
+                _name = ("连对" if _k[0] == int(_PT.PAIRS) else "顺子") + str(_k[1])
+            else:
+                _name = _NM.get(str(_k), str(_k))
+            if _mine < 0 and _theirs < 0:
+                continue
+            controls.append({
+                "pattern": _name,
+                "my_max": (bot_server.RANK_TXT[_mine] if _mine >= 0 else None),
+                "opp_possible_max": (bot_server.RANK_TXT[_theirs] if _theirs >= 0 else None),
+                "i_hold_max": bool(_hold),
+            })
+        controls.sort(key=lambda x: (not x["i_hold_max"], x["pattern"]))
+    except Exception as _e:
+        controls = {"error": repr(_e)[:120]}
+
+    # ---- 对手每类牌型概率分布（开局对所有牌型预演，实时更新）----
+    opp_patterns = None
+    try:
+        from pdk import patternmap as _pm
+        if len(rows):
+            _step = max(1, len(rows) // 64)
+            _ws = [list(x) for x in rows[::_step][:64]]
+            _wt = [float(w[i]) for i in range(0, len(rows), _step)][:64]
+        else:
+            _ws, _wt = [], []
+        _op = _pm.opp_patterns(_ws, _wt, my_cnt)
+        for _row in _op:
+            for _k in ("my_max", "max_p50", "max_p90"):
+                if _k in _row and _row[_k] is not None and _row[_k] >= 0:
+                    _row[_k] = bot_server.RANK_TXT[_row[_k]]
+        opp_patterns = [r for r in _op if r.get("p_has", 0) > 0.005]
+        opp_patterns.sort(key=lambda r: -r["p_has"])
+    except Exception as _e2:
+        opp_patterns = {"error": repr(_e2)[:120]}
+
+    # ---- 逐世界推演明细（逐世界"能否压住" + 每候选锁链画像；world_detail=false 可关以省时延）----
+    worlds_detail = None
+    try:
+        if payload.get("world_detail", True):
+            from pdk.agents import SolverAgent as _SA3
+            _ag3 = _SA3(bot_server._QFB(), cfg, **prod_solver_kw())
+            _wsel = [list(r) for r in rows[:16]]
+            _wtsel = [float(x) for x in (w[:16] if len(w) >= len(rows) else [1.0] * len(_wsel))]
+            if len(_wtsel) != len(_wsel):
+                _wtsel = [1.0] * len(_wsel)
+            _cgp = fast.CGame(my_cnt, _wsel[0] if _wsel else [0] * 13, 0, cfg)
+            if not trick:
+                _legal = [int(m) for m in fast.gen_leads_codes(my_cnt, cfg) if m]
+            else:
+                _legal = [int(m) for m in fast.gen_beats_codes(my_cnt, tuple(int(x) for x in trick), cfg) if m]
+            _legal.sort(key=lambda m: -fast.move_size(m))
+            _cands = _legal[:6]
+            _prof = {}
+            if _cands and _wsel:
+                try:
+                    _prof = _ag3._lock_chain(_cgp, _wsel, _wtsel, _cands)
+                except Exception:
+                    _prof = {}
+            _cand_rows = []
+            for _m in _cands:
+                _pt = (fast.classify_code(_m, False, cfg) or fast.classify_code(_m, True, cfg))
+                if _pt is None:
+                    continue
+                _pp, _cc, _rr = _prof.get(int(_m), (None, None, None))
+                _cand_rows.append({
+                    "move": "".join(bot_server.RANK_TXT[r] * ((_m >> (3 * r)) & 7)
+                                    for r in range(N_RANKS) if (_m >> (3 * r)) & 7),
+                    "ptype": int(_pt.ptype), "size": int(fast.move_size(_m)),
+                    "p_lock": (round(float(_pp), 4) if _pp is not None else None),
+                    "chain": (round(float(_cc), 2) if _cc is not None else None),
+                    "reclaim": (round(float(_rr), 2) if _rr is not None else None),
+                })
+            _wrows = []
+            for _i, (_wr, _wtv) in enumerate(zip(_wsel, _wtsel)):
+                _cb = {}
+                for _cr, _m in zip(_cand_rows, _cands):
+                    _pt2 = (fast.classify_code(_m, False, cfg) or fast.classify_code(_m, True, cfg))
+                    if _pt2 is None:
+                        continue
+                    _t4m = (int(_pt2.ptype), int(_pt2.main), int(_pt2.length), int(_pt2.nc))
+                    _cb[_cr["move"]] = int(bool(fast.gen_beats_codes(list(_wr), _t4m, cfg)))
+                _wrows.append({
+                    "i": int(_i),
+                    "cards": "".join(bot_server.RANK_TXT[r] * int(_wr[r]) for r in range(N_RANKS)),
+                    "w": round(float(_wtv), 5),
+                    "can_beat": _cb,
+                })
+            worlds_detail = {"n": int(len(rows)), "exhaustive": bool(getattr(b, "exhaustive", False)),
+                             "shown": len(_wrows), "cands": _cand_rows, "worlds": _wrows}
+    except Exception as _e3:
+        worlds_detail = {"error": repr(_e3)[:120]}
+
+    # ---- 推理链 / 残局候选点数（来自重放阶段构建的 reasoner）----
+    _rs = st.get("reasoner")
+    inferences = []
+    cand = None
+    if _rs is not None:
+        try:
+            inferences = _rs.infer()
+        except Exception:
+            inferences = []
+        if opp_n <= 2:
+            try:
+                cand = _rs.candidates(opp_n)
+            except Exception:
+                cand = None
+
     return {
         "opp_n": opp_n,
         "my_n": sum(my_cnt),
@@ -984,6 +1109,11 @@ def _belief_core(payload: dict, cfg) -> dict:
         "facts": facts,
         "lock": lock,
         "incomplete_snapshot": bool(st.get("incomplete")),
+        "inferences": inferences,        # 完整推理链（L1/L2 确定 + B1-B7 行为层，带置信度）
+        "candidates": cand,              # 对手剩<=2 张时的候选点数（台账 + 排除后）
+        "controls": controls,            # 牌型归属：当前最大单张/对子/三条/连对/顺子在谁手里
+        "opp_patterns": opp_patterns,    # 对手每类牌型的概率分布（预演推理）
+        "worlds_detail": worlds_detail,  # 逐世界推演明细（可 world_detail=false 关闭）
     }
 
 

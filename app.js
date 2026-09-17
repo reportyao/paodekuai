@@ -2444,8 +2444,12 @@ function bfRender(d) {
   $('belief-meta').innerHTML = perspName + ' · ' + bfMetaHTML(d);
   const out = [];
   out.push(bfSecProb(d, who, seat));
+  out.push(bfCandidatesHTML(d));        // 对手剩<=2 张：候选点数（有才显示）
+  out.push(bfSecPatterns(d, seat));     // 新：对手牌型概率分布
+  out.push(bfSecInfer(d, seat));        // 推理链（无 inferences 时退回 facts）
+  out.push(bfSecControls(d));           // 新：牌型归属（谁手里有当前最大）
   out.push(bfSecLedger(d, seat));
-  out.push(bfSecFacts(d, seat));
+  out.push(bfSecWorlds(d));             // 新：逐世界推演（折叠）
   out.push(bfSecLock(d, seat));
   body.innerHTML = out.join('');
 }
@@ -2600,6 +2604,124 @@ function bfSecLedger(d, seat) {
 }
 
 /* ③ 推断链：facts（每条带实测命中率） */
+/* ===== 上游 e037b99 新增字段的前端展示 ===== */
+
+/* 推理链（inferences）：比 facts 更完整——L1 台账确定 / L2 过牌硬推理 / B1-B7 行为层(带置信度) */
+const BF_INF_BADGE = {
+  L1: { t: '台账·确定', cls: 'ok' }, L2: { t: '过牌·确定', cls: 'ok' },
+  B1: { t: '行为', cls: '' }, B2: { t: '行为', cls: '' }, B3: { t: '行为', cls: '' },
+  B4: { t: '行为', cls: '' }, B5: { t: '行为', cls: '' }, B6: { t: '行为', cls: 'warn' },
+  B7: { t: '行为', cls: '' },
+};
+
+function bfSecInfer(d, seat) {
+  const inf = d.inferences || [];
+  const whoTxt = BF.persp === 'me' ? 'AI' : '你';
+  if (!inf.length) return bfSecFacts(d, seat);        // 老数据/无推理链时退回 facts
+  const items = inf.map(f => {
+    const kind = String(f.kind || '');
+    const bd = BF_INF_BADGE[kind] || { t: kind || '推理', cls: '' };
+    const conf = f.conf == null ? null : Number(f.conf);
+    const sure = (bd.cls === 'ok');                 // L1/L2 = 确定类，只需一个标签
+    const confPill = sure ? ''
+      : (conf != null ? '<span class="bf-pill' + (conf < 0.8 ? ' low' : '') + '">置信 ' + Math.round(conf * 100) + '%</span>' : '');
+    return '<div class="bf-fact"><span class="ico">' + bfEsc(kind || '·') + '</span><span class="txt">' +
+      bfEsc(String(f.text || '')) +
+      '<span class="bf-pill ' + (bd.cls === 'ok' ? '' : 'rule') + '">' + bfEsc(bd.t) + '</span>' + confPill +
+      '</span></div>';
+  }).join('');
+  return '<details class="bf-sec" open><summary>🔍 推理链' +
+    '<span class="tag">' + inf.length + ' 条</span><span class="chev">▶</span></summary>' +
+    '<div class="bf-inner"><p class="bf-note">模型从<b>' + whoTxt + '</b>的动作推出的完整链条：' +
+    '<b>L1</b> 台账确定、<b>L2</b> 过牌硬推理（这两类为确定结论），<b>B1-B7</b> 行为层（带置信度，可逐条校验）。</p>' +
+    items + '</div></details>';
+}
+
+/* 对手牌型概率（opp_patterns）：他"有没有这类牌型 / 能不能压我 / 最大可能到几" */
+function bfSecPatterns(d, seat) {
+  const ps = d.opp_patterns;
+  const whoTxt = BF.persp === 'me' ? 'AI' : '你';
+  if (!Array.isArray(ps) || !ps.length) return '';
+  const rows = ps.filter(p => Number(p.p_has || 0) > 0.005).slice(0, 12).map(p => {
+    const has = Number(p.p_has || 0), beat = Number(p.p_beats_me || 0);
+    const mx = p.max_p50 && p.max_p50 !== null ? String(p.max_p50) : '—';
+    const mx90 = p.max_p90 && p.max_p90 !== null ? String(p.max_p90) : '—';
+    return '<div class="bf-row" title="' + bfEsc('他持有该牌型的概率 ' + (has * 100).toFixed(1) +
+      '%；能压住我当前最大该牌型的概率 ' + (beat * 100).toFixed(1) + '%') + '">' +
+      '<span class="k" style="width:52px">' + bfEsc(String(p.pattern || '')) + '</span>' +
+      '<span class="bf-bar"><i style="width:' + Math.max(3, Math.round(has * 100)) + '%"></i></span>' +
+      '<span class="v">' + (has * 100).toFixed(0) + '%</span>' +
+      '<span class="v2" title="他最大可能到几（中位/9 成）">' + bfEsc(mx) + (mx90 !== mx ? '~' + bfEsc(mx90) : '') + '</span></div>' +
+      (beat > 0.01 ? '<div class="bf-cnt">能压住我的概率 ' + (beat * 100).toFixed(0) + '%</div>' : '');
+  }).join('');
+  return '<details class="bf-sec"' + (rows ? ' open' : '') + '><summary>🀄 对手牌型概率' +
+    '<span class="tag">' + ps.length + ' 类</span><span class="chev">▶</span></summary>' +
+    '<div class="bf-inner"><p class="bf-note">按牌型预演：<b>他手里有没有这类牌型</b>（第一行百分比）、' +
+    '他最大可能到几点（右侧「中位~九成」），以及<b>他能压住我</b>的概率。' +
+    '按"有"的概率从高到低。</p>' + (rows || '<p class="bf-note">暂无</p>') + '</div></details>';
+}
+
+/* 牌型归属（controls）：当前最大单张/对子/三条/连对/顺子在谁手里 */
+function bfSecControls(d) {
+  const cs = d.controls;
+  if (!Array.isArray(cs) || !cs.length) return '';
+  const rows = cs.slice(0, 14).map(c => {
+    const mine = !!c.i_hold_max;
+    return '<div class="bf-ctl' + (mine ? ' ok' : '') + '">' +
+      '<span class="p">' + bfEsc(String(c.pattern || '')) + '</span>' +
+      '<span class="me">' + (mine ? '✅ 最大在我手里' : '⚠ 最大不在我手里') +
+      (c.my_max ? '（我 ' + bfEsc(String(c.my_max)) + '）' : '') + '</span>' +
+      '<span class="opp">' + (c.opp_possible_max ? '他最多到 ' + bfEsc(String(c.opp_possible_max)) : '他不可能有') + '</span></div>';
+  }).join('');
+  return '<details class="bf-sec" open><summary>🧩 牌型归属' +
+    '<span class="tag">' + cs.filter(c => c.i_hold_max).length + '/' + cs.length + ' 在我手里</span>' +
+    '<span class="chev">▶</span></summary><div class="bf-inner">' +
+    '<p class="bf-note">"当前最大的那张/那对"到底在谁手里 —— 决定你这手能不能放心领出。' +
+    '（结构计算，不是采样。）</p>' + rows + '</div></details>';
+}
+
+/* 残局候选点数（candidates）：对手剩 ≤2 张时 */
+function bfCandidatesHTML(d) {
+  const cs = d.candidates;
+  if (!Array.isArray(cs) || !cs.length) return '';
+  const txt = cs.slice(0, 8).map(c =>
+    '<span class="bf-chip2">' + bfEsc(String(c.rank)) + '<em>未见' + c.unseen + '</em></span>').join('');
+  return '<div class="bf-most">🎯 他只剩 ' + (d.opp_n != null ? d.opp_n : '?') +
+    ' 张，候选点数：<span class="chips">' + txt + '</span></div>';
+}
+
+/* 逐世界推演（worlds_detail）：每候选锁率/连走/夺回 + 前 N 个世界里"他能否压住" */
+function bfSecWorlds(d) {
+  const wd = d.worlds_detail;
+  if (!wd || wd.error || (!wd.cands || !wd.cands.length)) return '';
+  const cands = (wd.cands || []).slice(0, 6);
+  const candRows = cands.map(c =>
+    '<div class="bf-row" title="' + bfEsc('锁率=对手压不住的概率；连走=领出后还能连续走几手；夺回=被压后能夺回的手数') + '">' +
+    '<span class="k" style="width:64px;font-family:Georgia,serif">' + bfEsc(String(c.move || '')) + '</span>' +
+    '<span class="bf-bar"><i style="width:' + Math.max(3, Math.round(Number(c.p_lock || 0) * 100)) + '%"></i></span>' +
+    '<span class="v">锁' + (c.p_lock == null ? '—' : Math.round(c.p_lock * 100) + '%') + '</span>' +
+    '<span class="v2">连' + (c.chain == null ? '—' : c.chain) + ' 夺' + (c.reclaim == null ? '—' : c.reclaim) + '</span></div>'
+  ).join('');
+  const moves = cands.map(c => String(c.move || ''));
+  const worlds = (wd.worlds || []).slice(0, 16);
+  const head = '<tr><th>世界</th><th>他手牌</th>' + moves.map(m => '<th>' + bfEsc(m) + '</th>').join('') + '</tr>';
+  const body = worlds.map(w =>
+    '<tr><td>' + (w.i + 1) + '</td><td class="cards">' + bfEsc(String(w.cards || '')) + '</td>' +
+    moves.map(m => {
+      const can = Number((w.can_beat || {})[m] || 0);
+      return '<td class="' + (can ? 'yes' : 'no') + '">' + (can ? '✓' : '✗') + '</td>';
+    }).join('') + '</tr>').join('');
+  return '<details class="bf-sec"><summary>🌍 逐世界推演' +
+    '<span class="tag">' + (wd.n || 0) + ' 种' + (wd.exhaustive ? '·全量' : '·采样') +
+    (wd.shown ? '，列 ' + wd.shown : '') + '</span><span class="chev">▶</span></summary>' +
+    '<div class="bf-inner">' +
+    '<p class="bf-note">候选出法逐条画像：<b>锁率</b>=对手压不住的概率、<b>连走</b>=之后能连走几手、' +
+    '<b>夺回</b>=被压后能夺回的手数。下表是前 ' + worlds.length + ' 个世界：他的具体手牌 + 能否压住每个候选。</p>' +
+    candRows +
+    '<div class="bf-wtable"><table>' + head + body + '</table></div>' +
+    '</div></details>';
+}
+
 function bfSecFacts(d, seat) {
   const facts = d.facts || [];
   const whoTxt = BF.persp === 'me' ? 'AI' : '你';

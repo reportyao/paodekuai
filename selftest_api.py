@@ -286,6 +286,35 @@ _rp = b.get("rank_prob") or {}
 check("belief.rank_cnt_p 与 rank_prob 自洽（P(>=1) ≥ 1-P(0)）",
       all(abs(1.0 - float(v.get("0", 0))) <= float(_rp.get(k, 0)) + 0.02
           for k, v in cp.items() if k in _rp), str(cp)[:80])
+# 上游 e037b99 新增：推理链 / 逐世界推演 / 牌型归属 / 对手牌型概率
+inf = b.get("inferences")
+check("belief.inferences 为数组且带 kind/text/conf",
+      isinstance(inf, list) and all(isinstance(x, dict) and x.get("text") and "kind" in x for x in inf),
+      str(inf)[:120])
+wd = b.get("worlds_detail")
+check("belief.worlds_detail 含 cands/worlds",
+      isinstance(wd, dict) and isinstance(wd.get("cands"), list) and isinstance(wd.get("worlds"), list),
+      str(wd)[:120])
+if isinstance(wd, dict) and wd.get("cands"):
+    check("worlds_detail.cands 含锁链画像(p_lock/chain/reclaim)",
+          all(("p_lock" in c and "chain" in c and "reclaim" in c) for c in wd["cands"]),
+          str(wd["cands"][:1]))
+if isinstance(wd, dict) and wd.get("worlds"):
+    check("worlds_detail.worlds 含逐世界 can_beat",
+          all(isinstance(w.get("can_beat"), dict) and w.get("cards") is not None for w in wd["worlds"]),
+          str(wd["worlds"][:1])[:140])
+ctl = b.get("controls")
+check("belief.controls 为牌型归属数组",
+      isinstance(ctl, list) and all("pattern" in c and "i_hold_max" in c for c in ctl), str(ctl)[:120])
+op = b.get("opp_patterns")
+check("belief.opp_patterns 为牌型概率数组",
+      isinstance(op, list) and all("pattern" in r and "p_has" in r for r in op), str(op)[:120])
+st_w, wd_off, _ = call("/api/belief", {"my_hand": A0519_HAND, "opp_n": 3,
+                                      "trick": [0, 2, 1, 0], "history": A0519_HIST,
+                                      "world_detail": False})
+check("belief world_detail=false 可关闭（worlds_detail 为空）",
+      st_w == 200 and not (wd_off.get("worlds_detail") or {}).get("worlds"), str(wd_off.get("worlds_detail"))[:80])
+
 ml = b.get("opp_most_likely") or {}
 check("belief.opp_most_likely 为点数->张数",
       bool(ml) and all(int(v) >= 1 for v in ml.values()), str(ml)[:110])

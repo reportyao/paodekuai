@@ -507,6 +507,23 @@ button { font-family: inherit; }
 .bf-sub > summary::-webkit-details-marker { display: none; }
 .bf-subbody { margin-top: 4px; }
 .bf-cnt .rk { display: inline-block; width: 18px; font-weight: 800; color: #ffe9b8; }
+/* 新字段展示：牌型概率右侧值 / 牌型归属 / 逐世界推演表 */
+.bf-row .v2 { width: 56px; text-align: right; font-size: 11.5px; color: #9db8a6; flex-shrink: 0;
+              font-variant-numeric: tabular-nums; }
+.bf-ctl { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline;
+          padding: 6px 8px; margin: 5px 0; border-radius: 9px;
+          background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.1); font-size: 12.5px; }
+.bf-ctl .p { font-weight: 800; color: #ffe9b8; min-width: 52px; }
+.bf-ctl.ok { background: rgba(126,224,168,.12); border-color: rgba(126,224,168,.4); }
+.bf-ctl .me { color: #d8ecff; }
+.bf-ctl .opp { color: #9db8a6; margin-left: auto; }
+.bf-wtable { overflow-x: auto; -webkit-overflow-scrolling: touch; margin-top: 8px; }
+.bf-wtable table { border-collapse: collapse; font-size: 11.5px; min-width: 100%; }
+.bf-wtable th, .bf-wtable td { border: 1px solid rgba(255,255,255,.12); padding: 3px 5px; text-align: center; }
+.bf-wtable th { color: #ffe9b8; background: rgba(255,255,255,.06); font-weight: 700; }
+.bf-wtable td.cards { font-family: Georgia, serif; letter-spacing: 1px; color: #d8ecff; white-space: nowrap; }
+.bf-wtable td.yes { color: #7ee0a8; font-weight: 800; }
+.bf-wtable td.no { color: #93ac9d; }
 .bf-cnt { display: flex; flex-wrap: wrap; gap: 4px 8px; margin: -1px 0 6px 30px;
           font-size: 11.5px; color: #93ac9d; }
 .bf-cnt span { white-space: nowrap; }
