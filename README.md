@@ -144,6 +144,29 @@ ls -t /home/ubuntu/paodekuai/data/replays/*.json | head   # 最新对局
 python3 -m json.tool "$(ls -t /home/ubuntu/paodekuai/data/replays/*.json | head -1)"
 ```
 
+## 内核版本与验收基线（2026-09-18）
+
+线上已部署上游 **`2fe077a`**（含 `R7 结构补全=关`、`single_order=关`、`arch_p1=开`、`count_lock/avail_lock/lone_single/legal_intersect` 等新规则；
+**模型权重与 C 核心未变**，无需重建）。部署后核对：`/health → pdkCommit=2fe077a`、7 个组件探针全绿、`prod_agent.kw` 与上游生产配方逐项一致。
+
+验收口径（每次升级都按这个跑）：
+
+| 层 | 内容 | 本次结果 |
+|---|---|---|
+| 上游单测/清单 | E2E 全流程 + 18 套单测（arch_p1 / search_gate / sure_win_sound / stage0_fixes / count_lock / deduce_cases / enemy_avail / follow_lone / engine / cross_c(17468 用例) / cgame_equiv / endgame_order / count_rules / decide_replay / deal_randomness / belief / a0519 / belief_api） | **E2E 19 项 0 失败；18 套全绿** |
+| 上游规则状态表 | `rules_status.py`：开关默认值 vs 生产配方一致性 + 复验队列 | **一致 OK**；7 条限制型规则待上游补复验栏 |
+| 桥/网关自测 | `selftest_api.py`（主实例 / 对外实例） | **89/89 · 69/69** |
+| 联调契约 | `test_api_conformance.py`（主 / 对外各一遍） | **38/38 · 38/38** |
+| 链路自检 | `/api/selftest` 金丝雀 + `/health` 组件探针 | **7 用例 + 7 组件全绿** |
+| 人类路径整局 | 与前端同协议（`/init→/legal→/action→/act`）打到结算 | 20 手 · AI 合法过牌 2 次 · **有牌必打违规 0** · 结算 `scores=[-14,14]` 自洽 |
+
+**公平性核对**：上游 `e037b99` 起，`/api/decide`、`/api/belief` 支持传入 `kitty`（扣底牌，用于"对手必无"推断）。
+本变体的 16 张底牌是**暗弃**（双方都看不到），因此桥**不向决策/信念路径传 kitty**（也未把底牌下发给前端快照）——AI 不会偷看底牌；
+若将来要做"明底"玩法，才需要显式打开。
+
+**AI 回合看门狗**：正常路径由 `beginTurn` 定时触发 `aiMove`；为防"轮到 AI 但无定时器/未在算/未暂停"的静默卡死，
+前端每 2.5s 巡检一次，命中就补调度（最多 3 次，之后给可操作报错）。只补调度，不改变任何决策（注入式验证：检测→补调度链路成立）。
+
 ## 性能与资源优先级（线上 2 核机器）
 
 线上 CVM 是 **S5.MEDIUM4（2 vCPU / 4GB，机型名里的 4 是内存不是核数）**，同机还跑着掼蛋/跑胡子/在线对战等项目，

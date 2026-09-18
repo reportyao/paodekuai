@@ -2300,6 +2300,26 @@ function quitToLobby() {
  *   双人热座（无会话）：无状态口径 {"my_hand","opp_n","trick","history"}（当前出牌方视角）
  * 不降级：拿不到就显示错误 + rid，绝不编造概率。
  */
+/* 回合看门狗：正常路径在 beginTurn 里定时触发 aiMove；万一出现"轮到 AI 但既无定时器、
+ * 也没在算、也没暂停"的静默卡死（等待者丢失/竞态等），这里补一次调度。
+ * 只补调度、不改变任何决策：真正的走法仍由同一个 aiMove/生产模型给出。 */
+const AI_WD = { timer: null, rescued: 0 };
+function aiWatchdogStart() {
+  if (AI_WD.timer) return;
+  AI_WD.timer = setInterval(() => {
+    const stuck = S.phase === 'playing' && S.mode === 'ai' && S.turn === 1
+      && S.aiTimer == null && !S.aiBlocked && !bridge.initing && !bridge.syncing;
+    if (!stuck) { AI_WD.rescued = 0; return; }
+    AI_WD.rescued++;
+    if (AI_WD.rescued <= 3) {
+      console.warn('[AI] 检测到回合卡死，补调度 aiMove（第 ' + AI_WD.rescued + ' 次）');
+      S.aiTimer = setTimeout(aiMove, 60);
+    } else if (AI_WD.rescued === 4) {
+      aiError('AI 回合长时间无响应（已自动重试 3 次），请点「重试连接 AI 服务」');
+    }
+  }, 2500);
+}
+
 const BF = { open: false, persp: 'ai', cache: {}, loading: false, err: '', rid: '', ply: -1, reqSeq: 0 };
 const BF_RANK_ORDER = ['2', 'A', 'K', 'Q', 'J', 'X', '9', '8', '7', '6', '5', '4', '3'];
 const BF_RANK_LABEL = { X: '10' };
@@ -2889,6 +2909,7 @@ function init() {
   $('btn-pass').addEventListener('click', humanPass);
   $('btn-hint').addEventListener('click', showHint);
   bfInitSheet();                                        // 记牌猜牌抽屉（移动端底部面板）
+  aiWatchdogStart();                                    // 回合看门狗（防 AI 回合静默卡死）
   $('btn-adopt').addEventListener('click', humanPlay);
   $('btn-handover-ok').addEventListener('click', confirmHandover);
   $('btn-next').addEventListener('click', () => {
