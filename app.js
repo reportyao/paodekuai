@@ -2168,17 +2168,22 @@ function onCardClick(id) {
 }
 let chosenMode = 'ai';
 /* 首页展示当前 AI 版本（模型 + 开局搜索 + 回退告警） */
+let __aiVerEpoch = 0;
 async function refreshAIVersion() {
   const el = $('ai-version');
   if (!el) return;
+  const epoch = ++__aiVerEpoch;                        // 防迟到回调覆盖（切牌档后旧探测后到）
+  const later = fn => setTimeout(() => { if (epoch === __aiVerEpoch) fn(); }, 0);
   if (isDeck15()) {
     const h = await ai15Health();
-    el.classList.toggle('warn', !h);
-    el.innerHTML = h
-      ? '🧪 15张深度 AI：<b>pdk45 全量</b>（C核心' + ((h.components || {}).c_core && (h.components || {}).c_core.ok ? '✓' : '✗')
-        + ' · 网络 ' + esc(((h.components || {}).fallback_net || {}).kind || '?')
-        + ' · ' + esc(h.mode || 'hybrid') + '）'
-      : '🧪 15张玩法：⛔ 深度 AI 服务未连接（对局会暂停并提示重试，不降级）';
+    later(() => {
+      el.classList.toggle('warn', !h);
+      el.innerHTML = h
+        ? '🧪 15张深度 AI：<b>pdk45 全量</b>（C核心' + ((h.components || {}).c_core && (h.components || {}).c_core.ok ? '✓' : '✗')
+          + ' · 网络 ' + esc(((h.components || {}).fallback_net || {}).kind || '?')
+          + ' · ' + esc(h.mode || 'hybrid') + '）'
+        : '🧪 15张玩法：⛔ 深度 AI 服务未连接（对局会暂停并提示重试，不降级）';
+    });
     return;
   }
   try {
@@ -2189,19 +2194,23 @@ async function refreshAIVersion() {
     const probe = r.netProbe || {};
     const commit = r.pdkCommit || {};
     const isFallback = probe.net && probe.net.indexOf('final56') < 0;
-    el.classList.toggle('warn', !!isFallback);
-    el.innerHTML = 'AI 模型：<b>' + (r.productionModel || '未知') + '</b>' +
-      (md5 ? ' <span class="ok">md5✓</span>' : ' <span class="bad">md5✗</span>') +
-      (commit.hash ? ' ｜ 版本：<b>' + esc(commit.hash) + '</b>' +
-        (commit.date ? ' <span class="dim">(' + esc(commit.date) + ')</span>' : '') : '') +
-      ' ｜ 开局搜索：<b>' + (cfg.openingSearch ? '开' : '关') + '</b>' +
-      (cfg.openingBudget != null ? '(≤' + cfg.openingBudget + 's)' : '') +
-      ' ｜ 双模式：' + (r.modes || []).join('/') +
-      ' ｜ 实际加载：<b>' + (probe.net || '未知') + '</b>' +
-      (isFallback ? ' <span class="bad">⚠ 已回退旧网络</span>' : ' <span class="ok">在线</span>');
+    later(() => {
+      el.classList.toggle('warn', !!isFallback);
+      el.innerHTML = 'AI 模型：<b>' + (r.productionModel || '未知') + '</b>' +
+        (md5 ? ' <span class="ok">md5✓</span>' : ' <span class="bad">md5✗</span>') +
+        (commit.hash ? ' ｜ 版本：<b>' + esc(commit.hash) + '</b>' +
+          (commit.date ? ' <span class="dim">(' + esc(commit.date) + ')</span>' : '') : '') +
+        ' ｜ 开局搜索：<b>' + (cfg.openingSearch ? '开' : '关') + '</b>' +
+        (cfg.openingBudget != null ? '(≤' + cfg.openingBudget + 's)' : '') +
+        ' ｜ 双模式：' + (r.modes || []).join('/') +
+        ' ｜ 实际加载：<b>' + (probe.net || '未知') + '</b>' +
+        (isFallback ? ' <span class="bad">⚠ 已回退旧网络</span>' : ' <span class="ok">在线</span>');
+    });
   } catch {
-    el.classList.add('warn');
-    el.innerHTML = 'AI 模型：<b>未连接</b> ⛔ AI 服务不可用 —— 按“不降级”策略，对局会暂停并提示重试（不会用内置 AI 代打）';
+    later(() => {
+      el.classList.add('warn');
+      el.innerHTML = 'AI 模型：<b>未连接</b> ⛔ AI 服务不可用 —— 按“不降级”策略，对局会暂停并提示重试（不会用内置 AI 代打）';
+    });
   }
 }
 
