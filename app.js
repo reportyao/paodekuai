@@ -951,7 +951,9 @@ function aiError(msg) {
         `${bridge.lastErr ? ' ｜ 最近错误：' + String(bridge.lastErr).slice(0, 120) : ''}`) +
     `</span></div>` +
     `<div class="res-line"><span class="k">请求 id</span><span class="v"><code>${String(bridge.lastRid || '-').replace(/[<>]/g, '')}</code>` +
-    `（报障时提供它，服务方可按 rid 精确定位该次调用）</span></div>`;
+    `（报障时提供它，服务方可按 rid 精确定位该次调用）</span></div>` +
+    `<div class="res-line"><span class="k">页面来源</span><span class="v"><code>${esc(location.host)}</code></span>` +
+    `<span class="dim"> ｜ 若这不是最新地址（服务器换过公网 IP），请刷新页面或用最新地址重开</span></div>`;
   $('btn-next').classList.add('hidden');
   $('btn-rematch').classList.add('hidden');
   $('btn-back-lobby').classList.remove('hidden');
