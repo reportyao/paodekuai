@@ -20,6 +20,7 @@ import replay_report  # noqa: E402  对局编号/读取/人工点评（与 CLI �
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8310
 AI_UPSTREAM = os.environ.get('PDK_AI_BRIDGE', 'http://127.0.0.1:8766').rstrip('/')
+AI15_UPSTREAM = os.environ.get('PDK_AI_BRIDGE15', 'http://127.0.0.1:8765').rstrip('/')   # 15张 pdk45 档
 ONLINE_UPSTREAM = os.environ.get('PDK_ONLINE', 'http://127.0.0.1:8311').rstrip('/')
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
@@ -74,6 +75,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     # ---- /ai/* -> AI 桥反向代理；/online/* -> 在线对战服务反向代理 ----
     def _is_ai(self):
         return self.path == '/ai' or self.path.startswith('/ai/')
+
+    def _is_ai15(self):
+        return self.path == '/ai15' or self.path.startswith('/ai15/')
 
     def _is_online(self):
         return self.path == '/online' or self.path.startswith('/online/')
@@ -237,6 +241,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._json(self._replays("GET"))
         if self._is_ai():
             return self._proxy(AI_UPSTREAM, '/ai')
+        if self._is_ai15():
+            return self._proxy(AI15_UPSTREAM, '/ai15')
         if self._is_online():
             return self._proxy(ONLINE_UPSTREAM, '/online')
         super().do_GET()
@@ -246,6 +252,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._json(self._replays("POST"))
         if self._is_ai():
             return self._proxy(AI_UPSTREAM, '/ai')
+        if self._is_ai15():
+            return self._proxy(AI15_UPSTREAM, '/ai15')
         if self._is_online():
             return self._proxy(ONLINE_UPSTREAM, '/online')
         self.send_error(404)

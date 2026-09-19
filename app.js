@@ -755,35 +755,81 @@ function setBridgeMode(on) {
 let externalAI = null;                                   // (ctx) => cards|null，由 pdkRegisterAI 注册
 function pdkRegisterAI(fn) { externalAI = fn; }
 
-/* ===== 15张模式：内置简易 AI（贪心占位；深度模型接口见 aiMove 内 Pdk15AI.adapter）===== */
-function pdk15Greedy(ctx) {
-  const legal = (ctx.legal || []).slice();
-  if (!legal.length) return null;                          // 无解 -> 过牌
-  const isLead = !ctx.last;
-  // combo 结构（analyzeShape）：{t:'single'|'pair'|...字符串牌型, key:主点数, len:张数}
-  const val = m => {
-    const c = m.combo;
-    if (c.t === 'bomb') return 10000 + c.key;              // 炸弹尽量留着
-    return c.key * 10 + m.cards.length * 0.1;
+/* ===== 15张模式：pdk45 深度 AI（/ai15 代理 -> pdk-ai pdk15 分支服务 :8765，不降级）=====
+ * 牌 id 映射：前端 15 张（DECK15_SKIP={43,45,46}：♦K、♣A、♦A）<-> pdk45 文档
+ * id（K=40..42、A=44、2=48）。0..42（3~Q 与 ♠♥♣K）同号；前端 44(♥A)->44、47(♠2)->48。
+ */
+const F15_TO_PDK45 = (() => {
+  const m = {};
+  for (let i = 0; i <= 42; i++) m[i] = i;
+  m[44] = 44; m[47] = 48;
+  return m;
+})();
+const PDK45_TO_F15 = (() => {
+  const m = {};
+  for (const k in F15_TO_PDK45) m[F15_TO_PDK45[k]] = +k;
+  return m;
+})();
+
+async function ai15Api(path, body, timeoutMs = 20000) {
+  const ac = ('AbortController' in window) ? new AbortController() : null;
+  const timer = ac ? setTimeout(() => ac.abort(), timeoutMs) : null;
+  try {
+    const r = await fetch('/ai15' + path, {
+      method: body === undefined ? 'GET' : 'POST',
+      headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: ac ? ac.signal : undefined,
+    });
+    let d = null;
+    try { d = await r.json(); } catch (e) { d = null; }
+    if (!r.ok) throw new Error((d && d.error) || ('HTTP ' + r.status));
+    return d;
+  } catch (e) {
+    if (e && e.name === 'AbortError') throw new Error('超时（' + Math.round(timeoutMs / 1000) + 's 未回）');
+    throw e;
+  } finally { if (timer) clearTimeout(timer); }
+}
+
+async function ai15Health(timeoutMs = 6000) {
+  try {
+    const h = await ai15Api('/api/health', undefined, timeoutMs);
+    return (h && h.ok && h.deck_profile === 'pdk45') ? h : null;
+  } catch (e) { return null; }
+}
+
+function ai15Trick(seat) {
+  if (!S.last || S.last.by === seat) return null;        // 领出/自己刚出的（全过回手）-> 无待跟牌型
+  const t = comboToTrick(S.last.combo);
+  const cb = S.last.combo, cs = S.last.cards;
+  const ncFix = { t1: 1, t2: 2, quad3: 3 };
+  const nc = cb.t === 'plane' ? (cs.length - 3 * (cb.k || 1))
+    : cb.t === 'planeBare' ? 0 : (ncFix[cb.t] ?? 0);
+  return [t[0], t[1], cs.length, nc];
+}
+
+function ai15History(seat) {
+  // 决策视角 = seat（接口约定调用方=座位0）：roundMoves 里 seat===seat 的记 0，对手记 1
+  return S.roundMoves.map(m => ({
+    seat: (m.seat === seat) ? 0 : 1,
+    move: (m.pass || !m.cards || !m.cards.length) ? [] : m.cards.map(c => F15_TO_PDK45[c]),
+  }));
+}
+
+/* pdk45 决策（不降级）：成功返回牌 id 数组（前端 id）或 []（明确过牌）；失败 throw */
+async function ai15Decide(seat) {
+  const payload = {
+    my_hand: S.hands[seat].map(c => F15_TO_PDK45[c.i]),
+    opp_n: S.hands[1 - seat].length,
+    trick: ai15Trick(seat),
+    history: ai15History(seat),
   };
-  // 一手走完直接赢
-  const done = legal.find(m => m.cards.length === ctx.hand.length);
-  if (done) return done.cards;
-  let pick;
-  if (isLead) {
-    // 领出：最小结构；对手只剩1张时领最大的单张（简单顶牌意识）
-    if (ctx.oppCount === 1) {
-      const singles = legal.filter(m => m.combo.t === 'single');
-      if (singles.length) pick = singles.reduce((a, b) => a.combo.key > b.combo.key ? a : b);
-    }
-    if (!pick) pick = legal.reduce((a, b) => val(a) <= val(b) ? a : b);
-  } else {
-    // 跟牌：取最小合法着法（有牌必打：只剩炸弹能管也必须管，与 UI/深度模型一致）
-    const nonBomb = legal.filter(m => m.combo.t !== 'bomb');
-    pick = (nonBomb.length ? nonBomb : legal).slice().sort((a, b) => val(a) - val(b))[0];
-    if (!pick) return null;
-  }
-  return pick.cards;
+  const r = await ai15Api('/api/decide', payload, 30000);
+  if (!r || r.error) throw new Error((r && r.error) || '空响应');
+  if (r.pass) return [];
+  const fids = (r.move || []).map(x => PDK45_TO_F15[x]);
+  if (fids.some(x => x === undefined)) throw new Error('AI 返回了未知牌 id（映射失败）');
+  return fids;
 }
 
 async function aiMove() {
@@ -800,24 +846,30 @@ async function aiMove() {
   };
   let cards = null;
   if (isDeck15()) {
-    /* ===== 15张模式：AI 适配接口（预留）=====
-     * 深度模型接入时实现 Pdk15AI.adapter = { play(ctx) -> cards数组|[]（过牌）|null（无解） }，
-     * ctx 与 16 张 externalAI 相同（hand/last/legal/opts，全部为本地真实数据）。
-     * 当前 adapter 为空 -> 走内置简易 AI（贪心：能压取最小、领出取最小结构）。
+    /* ===== 15张模式：pdk45 深度 AI（不降级）=====
+     * 平台流（API_PDK45.md §5）：前端持局，每手调 /ai15/api/decide 只算一手。
+     * 失败一律 aiError 暂停（绝不退回本地贪心）。
      */
-    const adapterRet = (window.Pdk15AI && typeof window.Pdk15AI.adapter === 'function')
-      ? await window.Pdk15AI.adapter(ctx) : null;
-    if (adapterRet === null) {
-      const mv = pdk15Greedy(ctx);
-      cards = mv;                                          // null=过牌（pdk15Greedy 已确认无解）
-    } else if (Array.isArray(adapterRet) && adapterRet.length === 0) {
-      // 有牌必打：本地与桥内一致，适配器不得在有合法着法时过牌
-      if (!ctx.legal || !ctx.legal.length) { applyPass(seat); return; }
-      console.warn('[Pdk15AI] 适配器在有合法着法时要求过牌，已改为最小合法着法');
-      cards = ctx.legal.slice().sort((a, b) => a.combo.key - b.combo.key)[0].cards;
-    } else if (Array.isArray(adapterRet)) {
-      cards = adapterRet;
+    let ids = null;
+    try {
+      ids = await ai15Decide(seat);
+    } catch (e) {
+      aiError('15张深度 AI 决策失败：' + (e && e.message ? e.message : e));
+      return;
     }
+    if (ids.length === 0) {
+      if (!ctx.legal || !ctx.legal.length) { applyPass(seat); return; }
+      aiError('15张深度 AI 要求过牌但本地有合法着法（引擎与前端失步，已暂停）');
+      return;
+    }
+    const idset = new Set(ids);
+    const hit = (ctx.legal || []).find(m => m.cards.length === idset.size
+      && m.cards.every(c => idset.has(c.i)));
+    if (!hit) {
+      aiError('15张深度 AI 返回了本地不合法的着法（已暂停，不降级）');
+      return;
+    }
+    cards = hit.cards;
   } else if (typeof externalAI === 'function') {
     if (!bridge.ready && bridge.initHands) {
       const t0 = Date.now();
@@ -856,8 +908,11 @@ function aiError(msg) {
     `<div class="res-line hl"><span class="v">${String(msg).replace(/[<>]/g, '')}</span></div>` +
     `<div class="res-line"><span class="k">当前状态</span><span class="v">对局已暂停：电脑<b>不会</b>用内置 AI 代打；恢复后自动继续</span></div>` +
     `<div class="res-line"><span class="k">诊断</span><span class="v">` +
-    `桥：${bridge.ready ? '已连接' : '未连接'}${bridge.no ? ' ｜ 本局 ' + bridge.no : ''}` +
-    `${bridge.lastErr ? ' ｜ 最近错误：' + String(bridge.lastErr).slice(0, 120) : ''}</span></div>` +
+    (isDeck15()
+      ? '15张AI服务（/ai15 → :8765）：' + (window.__ai15Down ? '未连接' : '见上方错误信息')
+      : `桥：${bridge.ready ? '已连接' : '未连接'}${bridge.no ? ' ｜ 本局 ' + bridge.no : ''}` +
+        `${bridge.lastErr ? ' ｜ 最近错误：' + String(bridge.lastErr).slice(0, 120) : ''}`) +
+    `</span></div>` +
     `<div class="res-line"><span class="k">请求 id</span><span class="v"><code>${String(bridge.lastRid || '-').replace(/[<>]/g, '')}</code>` +
     `（报障时提供它，服务方可按 rid 精确定位该次调用）</span></div>`;
   $('btn-next').classList.add('hidden');
@@ -870,6 +925,17 @@ function aiError(msg) {
 }
 async function aiRetry() {
   hideModal();
+  if (isDeck15()) {                                    // 15张：直接探活，通过即续局
+    const h = await ai15Health(8000);
+    if (h) {
+      S.aiBlocked = false; S.aiErrorMsg = '';
+      toast('15张 AI 服务已恢复，继续对局', 2200);
+      render(); beginTurn();
+    } else {
+      aiError('仍然连不上 15张 AI 服务（pdk45 模型不可用）');
+    }
+    return;
+  }
   const ok = await bridgeResyncQueued();
   if (ok) {
     S.aiBlocked = false; S.aiErrorMsg = '';
@@ -1175,7 +1241,9 @@ function startMatch() {
   if (S.mode === 'ai') { S.names = ['我', '电脑']; S.avatars = ['🙂', '🤖']; }
   else { S.names = ['玩家一', '玩家二']; S.avatars = ['🧑', '👦']; }
   if (isDeck15()) {
-    if (S.mode === 'ai') toast('🧪 15张模式：当前为内置简易 AI（深度模型待接入）', 3000);
+    if (S.mode === 'ai') ai15Health().then(h =>
+      toast(h ? '🤖 已接入 15 张深度 AI（pdk45 · ' + (h.mode || 'hybrid') + '）'
+              : '⛔ 15张 AI 服务未连接：对局将暂停并提示重试（不降级）', 3000));
   } else bridgeHealth().then(ok => {
     if (S.mode === 'ai') toast(ok ? '🤖 已接入生产版 AI 机器人（hybrid / dual 双模式）'
                                    : '⛔ AI 服务未连接：对局将暂停并提示重试（不降级）', 3000);
@@ -1233,7 +1301,7 @@ function beginTurn() {
     render();
     if (S.mode === 'ai' && S.aiBlocked) return;           // 暂停中：不自动行动
     const startAI = () => {
-      if (S.mode === 'ai' && isDeck15()) {                // 15张：简易 AI（本地），不依赖桥
+      if (S.mode === 'ai' && isDeck15()) {                // 15张：深度 AI（/ai15 平台流，无会话）
         S.aiTimer = setTimeout(aiMove, 150 + randInt(150));   // 只保留看得见的节拍，不再白等 0.6~1.1s（不影响决策）
         return;
       }
@@ -2067,8 +2135,13 @@ async function refreshAIVersion() {
   const el = $('ai-version');
   if (!el) return;
   if (isDeck15()) {
-    el.classList.remove('warn');
-    el.innerHTML = '🧪 <b>15张玩法</b>：当前为内置简易 AI ｜ 深度模型接口已预留（Pdk15AI.adapter），待接入 ｜ 在线对战暂不支持';
+    const h = await ai15Health();
+    el.classList.toggle('warn', !h);
+    el.innerHTML = h
+      ? '🧪 15张深度 AI：<b>pdk45 全量</b>（C核心' + ((h.components || {}).c_core && (h.components || {}).c_core.ok ? '✓' : '✗')
+        + ' · 网络 ' + esc(((h.components || {}).fallback_net || {}).kind || '?')
+        + ' · ' + esc(h.mode || 'hybrid') + '）'
+      : '🧪 15张玩法：⛔ 深度 AI 服务未连接（对局会暂停并提示重试，不降级）';
     return;
   }
   try {
@@ -2103,7 +2176,7 @@ function syncDeckSpecUI() {
   $('slogan-line').textContent = S.deckSpec === 15
     ? '两人对战 · 45张牌副 · 各15张 · 黑桃2最大 · 黑桃3先出 · 有牌必打'
     : '两人对战 · 48张牌 · 黑桃2最大 · 黑桃3先出 · 有牌必打';
-  $('btn-selftest').classList.toggle('hidden', S.deckSpec === 15);   // 自检修的是16张深度AI链路
+  $('btn-selftest').classList.toggle('hidden', false);               // 两档都有链路自检（15张走 /ai15）
   document.querySelectorAll('.rev-btn').forEach(b =>
     b.classList.toggle('hidden', S.deckSpec === 15));                // 服务端复盘仅覆盖16张局
   bfSyncBtn();
@@ -2218,32 +2291,40 @@ async function showHint() {
     $('btn-adopt').classList.add('hidden');
   };
   if (isDeck15()) {
-    // 15张模式：本地简易提示（不接桥；深度模型待接入）
-    const seatCtx = {
-      hand: S.hands[me].slice(), oppCount: S.hands[1 - me].length,
-      last: S.last ? S.last.combo : null, opts: S.opts,
-    };
-    seatCtx.legal = legalPlays(seatCtx.hand, seatCtx, S.opts);
-    const cards = pdk15Greedy(seatCtx);
-    src = '简易提示·15张';
-    if (!cards) {
-      $('btn-adopt').classList.add('hidden');           // 15张不接深度模型（接口预留 Pdk15AI.adapter）
+    // 15张模式：pdk45 深度提示（不降级）
+    showWaiting('🤖 15张深度模型思考中…（残局求解可能需要几秒）');
+    let ids = null;
+    try {
+      ids = await ai15Decide(me);
+    } catch (e) {
+      $('btn-adopt').classList.add('hidden');
+      S.selected = new Set(); render();
+      $('hint-bar').classList.remove('hidden');
+      $('hint-text').innerHTML = '⛔ <b>15张深度 AI 不可用</b>：' + esc(String(e && e.message ? e.message : e)) +
+        '（不降级，不提供内置建议；稍后重试）';
+      return;
+    }
+    if (ids.length === 0) {
+      S.selected = new Set(); S.hints = []; S.hintIdx = -1;
+      $('btn-adopt').classList.add('hidden');
+      render();
       $('hint-bar').classList.remove('hidden');
       $('hint-text').innerHTML = '建议<b>[' + src + ']</b>：不出（当前无合法压制）';
       return;
     }
-    const combo = analyzeShape(cards);
-    S.hints = [{ cards, combo }]; S.hintIdx = 0;
-    S.selected = new Set(cards.map(c => c.i));
+    const handObjs = S.hands[me].filter(c => ids.indexOf(c.i) >= 0);
+    const combo = analyzeShape(handObjs);
+    S.hints = [{ cards: handObjs, combo }]; S.hintIdx = 0;
+    S.selected = new Set(handObjs.map(c => c.i));
     $('btn-adopt').classList.add('hidden');
     const hb2 = $('hint-bar');
     hb2.classList.remove('hidden');
     $('hint-text').innerHTML = '建议<b>[' + src + ']</b> ' + comboName(combo) + '：<span class="hint-cards">' +
-      cards.map(c => cardText(c)).join(' ') + '</span>';
+      handObjs.map(c => cardText(c)).join(' ') + '</span>';
     render();
     return;
   }
-  if (S.mode === 'ai') {
+    if (S.mode === 'ai') {
     // 先手开局时桥可能仍在初始化（跨海约1~2秒）：等它完成再决策
     for (let i = 0; i < 60 && bridge.initing; i++) await new Promise(r => setTimeout(r, 200));
     if (bridge.lastMirror) { try { await bridge.lastMirror; } catch {} }   // 等最后一手镜像落库，避免重放缺手
