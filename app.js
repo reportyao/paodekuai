@@ -837,12 +837,7 @@ async function ai15Health(timeoutMs = 6000) {
 
 function ai15Trick(seat) {
   if (!S.last || S.last.by === seat) return null;        // 领出/自己刚出的（全过回手）-> 无待跟牌型
-  const t = comboToTrick(S.last.combo);
-  const cb = S.last.combo, cs = S.last.cards;
-  const ncFix = { t1: 1, t2: 2, quad3: 3 };
-  const nc = cb.t === 'plane' ? (cs.length - 3 * (cb.k || 1))
-    : cb.t === 'planeBare' ? 0 : (ncFix[cb.t] ?? 0);
-  return [t[0], t[1], cs.length, nc];
+  return comboToTrick(S.last.combo);                     // len/nc 语义已按引擎口径修正
 }
 
 function ai15History(seat) {
@@ -851,6 +846,22 @@ function ai15History(seat) {
     seat: (m.seat === seat) ? 0 : 1,
     move: (m.pass || !m.cards || !m.cards.length) ? [] : m.cards.map(c => F15_TO_PDK45[c]),
   }));
+}
+
+/* 15张：按规则（而非枚举表）校验 AI 返回。legalPlays 只是 UI 候选枚举器，
+ * 带牌/花色组合不完备；引擎返回的同点数异花色、异带牌都可能是合法着法。 */
+function ai15RuleCheck(seat, ids) {
+  const hand = S.hands[seat];
+  const cards = ids.map(x => hand.find(c => c.i === x)).filter(Boolean);
+  if (cards.length !== ids.length) return { ok: false, err: '返回了不在手牌中的牌' };
+  if (!cards.length) return { ok: true, pass: true, combo: null, cards };
+  const combo = analyzeShape(cards);
+  if (!combo) return { ok: false, err: '不是有效牌型' };
+  if (!comboContextOK(combo, hand.length, S.opts)) return { ok: false, err: '牌型时机不合法（三张/三带一/纯飞机仅最后一手）' };
+  if (breaksBomb(hand, cards, S.opts)) return { ok: false, err: '拆炸弹被当局规则禁止' };
+  if (S.last && S.last.by !== seat && !canBeat(combo, S.last.combo, S.opts)) return { ok: false, err: '管不上当前牌型' };
+  if (violatesBaodan(hand, combo, S.hands[1 - seat].length)) return { ok: false, err: '对方报单时单张必须最大' };
+  return { ok: true, combo, cards };
 }
 
 /* pdk45 决策（不降级）：成功返回牌 id 数组（前端 id）或 []（明确过牌）；失败 throw */
@@ -894,19 +905,23 @@ async function aiMove() {
       aiError('15张深度 AI 决策失败：' + (e && e.message ? e.message : e));
       return;
     }
-    if (ids.length === 0) {
-      if (!ctx.legal || !ctx.legal.length) { applyPass(seat); return; }
-      aiError('15张深度 AI 要求过牌但本地有合法着法（引擎与前端失步，已暂停）');
+    const chk = ai15RuleCheck(seat, ids);
+    const legal = ctx.legal || [];
+    if (!chk.ok || (chk.pass && legal.length)) {
+      // 规则权威：模型着法未过规则校验（或建议过牌但有牌必打）时，按规则改出最小可压着法。
+      // 与 16 张桥 _legal_or_fallback 同一先例——不是降级到内置 AI，是规则强制修正（可见提示+留痕）。
+      if (!legal.length) { applyPass(seat); return; }
+      const pick = legal.slice().sort((a, b) => a.combo.key - b.combo.key || a.cards.length - b.cards.length)[0];
+      console.warn('[Pdk15] 规则修正:', chk.err || '建议过牌但有牌必打', '| AI返回', ids,
+        '| 改出', pick.cards.map(c => c.i));
+      toast('⚠ AI 着法经规则修正：' + (chk.err || '有牌必打') + '，已改出最小可压的一手', 3200);
+      cards = pick.cards;
+    } else if (chk.pass) {
+      applyPass(seat);
       return;
+    } else {
+      cards = chk.cards;
     }
-    const idset = new Set(ids);
-    const hit = (ctx.legal || []).find(m => m.cards.length === idset.size
-      && m.cards.every(c => idset.has(c.i)));
-    if (!hit) {
-      aiError('15张深度 AI 返回了本地不合法的着法（已暂停，不降级）');
-      return;
-    }
-    cards = hit.cards;
   } else if (typeof externalAI === 'function') {
     if (!bridge.ready && bridge.initHands) {
       const t0 = Date.now();
@@ -1130,8 +1145,13 @@ function trickToCombo(t4) {
   return { t: map[t4[0]] || 'single', key: t4[1] === 12 ? 15 : t4[1] + 3, len: t4[2] };
 }
 function comboToTrick(combo) {
+  /* trick = [ptype, main, len, nc]，len 语义随牌型（2026-09-19 对 pdk45/std48 双档实测定准）：
+   * 连对=对数、飞机=三张组数、其余=张数；nc=附带张数（三带一1/三带二2/四带三3/飞机翼数）。 */
   const map = { single: 0, pair: 1, pairseq: 2, triple: 3, t2: 4, t1: 5, plane: 6, planeBare: 6, straight: 7, bomb: 8, quad3: 9 };
-  return [map[combo.t] ?? 0, combo.key === 15 ? 12 : combo.key - 3, combo.len, combo.k || 0];
+  const lenFix = { pairseq: combo.len / 2, plane: combo.k || combo.len / 3, planeBare: combo.k || combo.len / 3 };
+  const ncFix = { t1: 1, t2: 2, quad3: 3 };
+  const nc = combo.t === 'plane' ? (combo.k || 1) * 2 : combo.t === 'planeBare' ? 0 : (ncFix[combo.t] ?? 0);
+  return [map[combo.t] ?? 0, combo.key === 15 ? 12 : combo.key - 3, lenFix[combo.t] ?? combo.len, nc];
 }
 function showOnlineRoundModal(rr, matchEnd) {
   const w = rr.winner;
@@ -2352,16 +2372,28 @@ async function showHint() {
         '（不降级，不提供内置建议；稍后重试）';
       return;
     }
-    if (ids.length === 0) {
+    const chk = ai15RuleCheck(me, ids);
+    if (!chk.ok) {
+      $('btn-adopt').classList.add('hidden');
+      S.selected = new Set(); render();
+      $('hint-bar').classList.remove('hidden');
+      $('hint-text').innerHTML = '⛔ 深度建议未通过规则校验：' + esc(chk.err) + '（可稍后重试）';
+      return;
+    }
+    if (chk.pass) {
+      const forced = legalPlays(S.hands[me], { last: S.last ? S.last.combo : null,
+        oppCount: S.hands[1 - me].length }, S.opts);
       S.selected = new Set(); S.hints = []; S.hintIdx = -1;
       $('btn-adopt').classList.add('hidden');
       render();
       $('hint-bar').classList.remove('hidden');
-      $('hint-text').innerHTML = '建议<b>[' + src + ']</b>：不出（当前无合法压制）';
+      $('hint-text').innerHTML = (forced && forced.length)
+        ? '⛔ 深度模型建议过牌，但「有牌必打」要求出牌（规则冲突，已忽略该建议，可稍后重试）'
+        : '建议<b>[' + src + ']</b>：不出（当前无合法压制）';
       return;
     }
-    const handObjs = S.hands[me].filter(c => ids.indexOf(c.i) >= 0);
-    const combo = analyzeShape(handObjs);
+    const handObjs = chk.cards;
+    const combo = chk.combo;
     S.hints = [{ cards: handObjs, combo }]; S.hintIdx = 0;
     S.selected = new Set(handObjs.map(c => c.i));
     $('btn-adopt').classList.add('hidden');
