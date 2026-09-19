@@ -462,8 +462,79 @@ def allocate_no(prefix: str = "A") -> str:
         return no
 
 
+HEART_10 = 29                       # ♥10 的牌 id（rankIdx 7 × 4 + suit 1）；红十翻倍用
+
+
+def compute_result(hands, moves, opts, winner) -> dict:
+    """按网页版计分规则结算（与 app.js settle() 逐条对齐）。
+
+    底分 = 输家剩余张数（剩 1 张不计分）；关门（输家一手未出）失分 ×2；
+    未被压掉的炸弹每颗 ±10（后手用更大炸弹直接压掉才不算，隔了过牌重新领出不算压）；
+    红桃十翻倍（opts.red10，持有者所在一方输赢 ×2）。
+
+    为什么在桥里算：内核 Game.scores 对这套人类规则从不计分（恒 [0,0]），而网页版只把
+    结果存本地。棋谱是对局记录/复盘的权威数据，必须自带可展示的结算结果。
+    返回 dict（写进棋谱 result 字段；scores 取 delta）。任何异常由调用方兜底，不影响落盘。
+    """
+    loser = 1 - int(winner)
+    played = [0, 0]
+    bombs = []                                   # [{by, beaten}]
+    prev_live = None                             # 上一手非过牌且中间无过牌（= 可被直接压）
+    for m in moves or []:
+        if not isinstance(m, dict) or m.get("pass") or not (m.get("cards")):
+            prev_live = None
+            continue
+        seat = int(m.get("seat") or 0)
+        played[seat] += len(m["cards"])
+        combo = m.get("combo") or {}
+        is_bomb = (combo.get("ptype") == 8)
+        if is_bomb and prev_live is not None and (prev_live.get("combo") or {}).get("ptype") == 8:
+            for b in reversed(bombs):            # 更大炸弹直接压掉上家炸弹：被压的不计分
+                if not b["beaten"]:
+                    b["beaten"] = True
+                    break
+        if is_bomb:
+            bombs.append({"by": seat, "beaten": False})
+        prev_live = m
+    rem = max(0, len(hands[loser] or []) - played[loser])
+    shut = played[loser] == 0
+    base = 0 if rem == 1 else rem
+    if shut:
+        base *= 2
+    surv = [b for b in bombs if not b["beaten"]]
+    bw = sum(1 for b in surv if b["by"] == int(winner))
+    bl = len(surv) - bw
+    dW = base + 10 * (bw - bl)
+    dL = -dW
+    red_txt = ""
+    if opts.get("red10"):
+        holder = next((seat for seat in (0, 1) if HEART_10 in (hands[seat] or [])), None)
+        if holder is not None:
+            who = "你" if holder == 0 else "AI"
+            if holder == int(winner):
+                dW *= 2
+                dL = -dW
+            else:
+                dL *= 2
+                dW = -dL
+            red_txt = f"{who} 持有红桃十，翻倍"
+    delta = [0, 0]
+    delta[int(winner)] = dW
+    delta[loser] = dL
+    return {"winner": int(winner), "loser": loser, "rem": rem, "shut": bool(shut),
+            "base": base, "bombs": [bw, bl], "redTxt": red_txt, "delta": delta}
+
+
 def write_replay(s: Shadow, live: bool):
     """写对局文件。开局即写（live=True，含编号），每手更新，终局改写 live=False。"""
+    res = None
+    if not live and getattr(s.game, "winner", None) is not None:
+        try:
+            res = compute_result(s.init_payload["hands"], getattr(s, "moves_detail", []),
+                                 s.init_payload.get("opts") or {}, s.game.winner)
+        except Exception as e:
+            print(f"[bridge] 结算失败（{type(e).__name__}: {e}），棋谱无 result 字段",
+                  file=sys.stderr, flush=True)
     payload = {
         "no": s.no,                                   # 对局编号（开局即定，方便“复盘当局”定位）
         "timeText": s.time_text,
@@ -479,8 +550,11 @@ def write_replay(s: Shadow, live: bool):
         "moves": list(getattr(s, "moves_detail", [])),
         "codes": list(s.codes),
         "winner": (None if live else s.game.winner),
-        "scores": (None if live else list(s.game.scores or (0, 0))),
+        # scores：人类规则的本局净分（delta）。内核 g.scores 对这套规则恒为 [0,0]，不再直写
+        "scores": (None if live else (list(res["delta"]) if res else [0, 0])),
     }
+    if res:
+        payload["result"] = res
     if getattr(s, "caller", ""):                      # 外部调用方的对局：标注归属与耗时
         payload["caller"] = s.caller
         payload["api"] = True

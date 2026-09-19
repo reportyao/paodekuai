@@ -1584,6 +1584,8 @@ async function openReview(no, sid) {
   $('rv-meta').innerHTML = isOnline
     ? `${g.timeText || ''} ｜ 真人局 房号${g.code} 第${g.round}/${g.rounds}局 ｜ ${names[0]} vs ${names[1]} ｜ 先手 座位${g.firstPlayer}`
     : `${g.timeText || ''} ｜ 人机局 ｜ ${names[0]}(座位0) vs ${names[1]}(座位1) ｜ 模式 ${g.mode || ''} ｜ ${g.net || ''}`;
+  const rr = (!isOnline && g.result && g.result.delta) ? g.result : null;   // 桥结算的本局分数
+  if (rr) $('rv-meta').innerHTML += ` ｜ <b>${esc(names[rr.winner] || '?')} 胜</b>·剩${rr.rem}张${rr.shut ? '·关门×2' : ''}${(rr.bombs && (rr.bombs[0] + rr.bombs[1])) ? '·未压炸弹 ' + rr.bombs[0] + '/' + rr.bombs[1] : ''}${rr.redTxt ? '·' + esc(rr.redTxt) : ''} ｜ 本局分 <b class="num ${rr.delta[0] >= 0 ? 'pos' : 'neg'}">${rr.delta[0]}</b> / <b class="num ${rr.delta[1] >= 0 ? 'pos' : 'neg'}">${rr.delta[1]}</b>`;
   $('rv-h0-title').textContent = names[0] + '（座位0）';
   $('rv-h1-title').textContent = names[1] + '（座位1）';
 

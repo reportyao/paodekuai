@@ -379,6 +379,13 @@ def result_of(d: dict) -> str:
         names = d.get("names", ["甲", "乙"])
         w = names[r.get("winner", 0)] if r.get("winner", 0) < len(names) else "?"
         return f"{w} 胜 剩{r.get('rem')}张 分{r.get('delta')}"
+    r = d.get("result") or {}
+    if isinstance(r, dict) and r.get("delta") is not None:
+        # 桥结算过的局（compute_result）：直接展示人类规则的本局净分
+        who = ("调用方" if d.get("winner") == 0 else "AI") if (d.get("api") or d.get("caller"))             else ("你" if d.get("winner") == 0 else "AI")
+        dur = d.get("durationSec")
+        return (f"{who} 胜 剩{r.get('rem')}张 分{r.get('delta')}"
+                + (f" 用时{dur}s" if dur else ""))
     if d.get("api") or d.get("caller"):
         who = "调用方" if d.get("winner") == 0 else "AI"
         dur = d.get("durationSec")
