@@ -533,7 +533,44 @@ const SELFTEST_COMP_CN = {
   c_core: 'C 求解核心', fallback_net: '生产网络', prod_agent: '生产智能体',
   reasoning: '推理引擎', patternmap: '牌型地图', candgen: '合理枚举闸门',
 };
+async function runSelftest15() {
+  const box = $('selftest-box');
+  const btn = $('btn-selftest');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ 自检中…'; }
+  if (box) box.innerHTML = '<div class="st-line dim">正在跑 15张（pdk45）链路自检（真实决策路径断言）…</div>';
+  try {
+    const h = await ai15Api('/api/health', undefined, 15000).catch(() => null);
+    const bits = [];
+    const c = (h && h.components) || {};
+    const asserts = [
+      ['ok', !!(h && h.ok)],
+      ['牌档 deck_profile=pdk45', !!(h && h.deck_profile === 'pdk45')],
+      ['牌堆 45/15/15', !!(h && h.deck && h.deck.cards === 45 && h.deck.hand_n === 15 && h.deck.kitty === 15)],
+      ['C 求解核心', !!(c.c_core && c.c_core.ok)],
+      ['冠军网络 a2c56·256', !!(c.fallback_net && c.fallback_net.ok && c.fallback_net.kind === 'a2c56' && c.fallback_net.hidden === 256)],
+      ['生产智能体全栈', !!(c.prod_agent && c.prod_agent.ok)],
+      ['模式 hybrid', !!(h && h.mode === 'hybrid')],
+    ];
+    asserts.forEach(([k, ok]) => bits.push(`<div class="st-line">${ok ? '✅' : '❌'} ${k}</div>`));
+    let st = null;
+    if (h && h.ok) {
+      st = await ai15Api('/api/selftest', {}, 90000).catch(() => null);
+      if (st && st.cases) {
+        bits.push(...st.cases.map(x =>
+          `<div class="st-line">${x.ok ? '✅' : '❌'} ${esc(x.name || '')} <span class="dim">${x.ms || 0}ms${x.ok ? '' : ' — ' + esc(String(x.err || '').slice(0, 90))}</span></div>`));
+      }
+      bits.push(`<div class="st-line ${(h.ok && st && st.ok) ? 'st-ok' : 'st-bad'}">${(h.ok && st && st.ok) ? '🎉 15张链路自检全部通过：pdk45 全量 AI 在真实运作' : '⚠️ 15张链路有降级或异常：请把失败项报给服务方'}</div>`);
+    } else {
+      bits.push('<div class="st-line st-bad">❌ 15张 AI 服务不可达（/ai15 · :8765）</div>');
+    }
+    if (box) box.innerHTML = bits.join('');
+    return st;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🩺 链路自检'; }
+  }
+}
 async function runSelftest() {
+  if (isDeck15()) return runSelftest15();
   const box = $('selftest-box');
   const btn = $('btn-selftest');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ 自检中…（约 4 秒）'; }
