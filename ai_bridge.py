@@ -512,9 +512,11 @@ def save_replay(sid: str, s: Shadow):
 
 
 def build_cfg(o: dict) -> Config:
+    # nobomb（炸弹不可拆）已弃用为默认关：网页版已固定炸弹可拆；
+    # 显式传 nobomb=true 仍生效（旧棋谱/外部调用方按其记录规则解释）。
     return Config(
         triple_no_follow=bool(o.get("sanzhang", False)),
-        bomb_indivisible=bool(o.get("nobomb", True)),
+        bomb_indivisible=bool(o.get("nobomb", False)),
         heart_ten_double=bool(o.get("red10", False)),
         four_with_three=bool(o.get("four3", False)),
     )
@@ -817,7 +819,7 @@ def do_suggest(p):
 # 上游 pdk-ai 8db4fb79 起提供 /api/belief：给定"我手牌 + 对手张数 + 待跟牌型 + 动作史"，
 # 返回 AI 对对手手牌的推断快照（记牌台账/点数概率/最可能手牌/推断链/锁牌认证）。
 # 这里镜像同一契约，但规则 cfg 取"当局真实 opts"——上游用模块级 CFG，而网页版可能带
-# 自定义开关（炸弹不可拆/三张不可接…），记牌与过牌推断必须按当局规则算才对得上。
+# 自定义开关（三张不可接/红十翻倍等；炸弹一律可拆），记牌与过牌推断必须按当局规则算才对得上。
 BELIEF_LOCK_MAX_WORLDS = _env_int("PDK_BELIEF_LOCK_MAX") or 8000      # lock.vs_trick 认证的世界数上限（性能保护）
 BELIEF_LEADS_MAX_WORLDS = _env_int("PDK_BELIEF_LEADS_MAX") or 1200    # lock.leads 候选认证的世界数上限
 BELIEF_LEADS_MAX_CANDS = _env_int("PDK_BELIEF_LEADS_CANDS") or 24     # 最多认证多少个合法领出候选
@@ -1530,7 +1532,7 @@ def do_analyze(p: dict):
 def do_decide(p: dict):
     """无状态单步决策（生产内核）：{my_hand, opp_n, trick, history, opts?, explain?, mode?}。
 
-    规则由 opts 决定（默认 = 网页版默认规则：炸弹不可拆/红十翻倍/三张可接/四带三关闭），
+    规则由 opts 决定（默认 = 网页版默认规则：炸弹可拆/红十不翻倍/三张可接/四带三关闭），
     因此调用方与 AI 用同一套规则；失败直接报错（不降级）。
     """
     mode = str(p.get("mode", "hybrid")).lower()
@@ -1570,7 +1572,7 @@ def _check_trick(trick):
 def _decide_core(payload: dict, cfg, mode: str = "hybrid") -> dict:
     """与 pdk-ai server._decide 同源的单步决策，但 **规则 cfg 与模式可选**。
 
-    为什么自己实现：调用方（网页版/外部）可能带 opts（如"炸弹不可拆"），而上游 /api/decide
+    为什么自己实现：调用方（网页版/外部）可能带 opts（如"四带三""三张不可接"），而上游 /api/decide
     用的是模块级 CFG（= Config() 默认）。这里把上游 _decide 的完整流程复刻一遍，关键点
     一个不少：belief 由 _replay_decide_history 增量重建（含对手 choice 似然更新）、
     played/plays_cnt/trick 一并还原进 CGame、fallback 的 last/opp_p/opening 门控与

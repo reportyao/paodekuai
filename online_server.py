@@ -87,7 +87,7 @@ def save_round_replay(room: "Room"):
 def build_cfg(o: dict) -> Config:
     return Config(
         triple_no_follow=bool(o.get("sanzhang", False)),
-        bomb_indivisible=bool(o.get("nobomb", True)),
+        bomb_indivisible=bool(o.get("nobomb", False)),  # 默认炸弹可拆（与网页版一致；显式 nobomb=true 仍生效）
         heart_ten_double=bool(o.get("red10", False)),
         four_with_three=bool(o.get("four3", False)),
     )

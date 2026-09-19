@@ -188,12 +188,12 @@ SUIT_CN = "♠♥♣♦"
 </ul>
 <h3 id="h9">2.5 规则变体 <code>opts</code></h3>
 <pre><code>
-{"red10": true, "four3": false, "nobomb": true, "sanzhang": false}
+{"red10": true, "four3": false, "nobomb": false, "sanzhang": false}
 </code></pre>
 <table><thead><tr><th>键</th><th>默认</th><th>含义</th></tr></thead><tbody>
 <tr><td><code>red10</code></td><td><code>false</code></td><td>红桃 10 翻倍（拿到 ♥10 的一方输赢 ×2）</td></tr>
 <tr><td><code>four3</code></td><td><code>false</code></td><td>允许"四带三"（4 张 + 任意 3 张）</td></tr>
-<tr><td><code>nobomb</code></td><td><code>true</code></td><td>炸弹不可拆开当其他牌型打出</td></tr>
+<tr><td><code>nobomb</code></td><td><code>false</code></td><td>炸弹不可拆开当其他牌型打出。<b>默认已改为可拆</b>（该开关已从网页版移除）；旧棋谱/兼容调用仍可显式传 <code>true</code></td></tr>
 <tr><td><code>sanzhang</code></td><td><code>false</code></td><td>三张不可接（三张/三带一仅末手，且不能管三带二）</td></tr>
 </tbody></table>
 <blockquote><p>请让 <code>opts</code> 与你实际使用的规则一致，否则 AI 会按错误规则决策；整局对局里同一个 <code>gid</code> 的规则在开局时固定。</p></blockquote>
@@ -496,7 +496,7 @@ SUIT_CN = "♠♥♣♦"
 <li><b>有牌必打</b>：能压必须压；确实压不上时才可过牌</li>
 </ol>
 <ol>
-<li>炸弹可压任意牌型；炸弹之间比点数；炸弹不可拆（<code>nombomb</code>）</li>
+<li>炸弹可压任意牌型；炸弹之间比点数；<b>炸弹默认可拆开</b>当其他牌型打出（兼容键 <code>nobomb=true</code> 可恢复不可拆）</li>
 </ol>
 <ol>
 <li>三张 / 三带一仅最后一手（<code>sanzhang</code> 变体下更严：不能管三带二）</li>

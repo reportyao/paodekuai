@@ -12,7 +12,7 @@ const S = {
   screen: 'lobby',
   mode: 'ai',                                  // 'ai' | 'hotseat'
   deckSpec: 16,                                // 牌副规格：16（经典，深度AI）| 15（新玩法，简易AI）
-  opts: { sanzhang: false, nobomb: true, red10: false, four3: false },
+  opts: { sanzhang: false, nobomb: false, red10: false, four3: false },   // nobomb 已弃用：炸弹一律可拆（旧棋谱仍按其记录值解释）
   rounds: 10, roundNo: 0,
   total: [0, 0], history: [],
   names: ['我', '电脑'], avatars: ['🙂', '🤖'],
@@ -159,7 +159,7 @@ function comboContextOK(combo, handLen, opts) {
   if (combo.t === 'quad3' && !opts.four3) return false;
   return true;
 }
-/* 炸弹不可拆：手牌中某点数满4张（≤K）而打法只用了一部分 */
+/* 炸弹不可拆（仅兼容旧棋谱/外部 opts；网页版已固定炸弹可拆，nobomb 恒为 false）：手牌中某点数满4张（≤K）而打法只用了一部分 */
 function breaksBomb(hand, cards, opts) {
   if (!opts.nobomb) return false;
   const hm = rankCounts(hand), cm = rankCounts(cards);
@@ -910,7 +910,7 @@ async function onlineCreate() {
   try {
     const r = await onlineApi('/api/create', {
       name, rounds: +$('sel-rounds').value,
-      opts: { sanzhang: $('opt-sanzhang').checked, nobomb: $('opt-nobomb').checked,
+      opts: { sanzhang: $('opt-sanzhang').checked, nobomb: false,
               red10: $('opt-red10').checked, four3: $('opt-four3').checked },
     });
     if (r.error) { onTip(r.error); return; }
@@ -934,7 +934,7 @@ async function onlineJoin() {
 function startOnlineGame() {
   S.mode = 'online';
   S.opts = {
-    sanzhang: $('opt-sanzhang').checked, nobomb: $('opt-nobomb').checked,
+    sanzhang: $('opt-sanzhang').checked, nobomb: false,
     red10: $('opt-red10').checked, four3: $('opt-four3').checked,
   };
   S.rounds = +$('sel-rounds').value;
@@ -1166,7 +1166,7 @@ function startMatch() {
   if (S.deckSpec === 15 && chosenMode === 'online') { toast('15张模式暂不支持在线对战，已切回16张'); S.deckSpec = 16; syncDeckSpecUI(); }
   S.opts = {
     sanzhang: $('opt-sanzhang').checked,
-    nobomb: $('opt-nobomb').checked,
+    nobomb: false,
     red10: $('opt-red10').checked,
     four3: $('opt-four3').checked,
   };

@@ -430,6 +430,7 @@ window.Pdk15AI = {
 - 牌型：单张 / 对子 / 连对(≥2对) / 顺子(5~12张) / 三带二 / 飞机(≥2连三张，每副带2张) / 炸弹(4张同点，3333最小、KKKK最大)。
 - **三个A（AAA）只是三张牌，不算炸弹**（A只有3张，凑不出四个A）。
 - 纯三张、三带一只能在最后一手打出（可选「三张不可接」后也不能管三带二）。
+- **炸弹可以拆开打**（默认固定，无开关）：炸弹里的牌可当单张/对子/三张等打出。
 - 报单：剩1张须报单；对方报单后你出单张必须出最大单张（防放水/包赔）。
 
 ## 计分（底分 1分/张）
@@ -442,7 +443,6 @@ window.Pdk15AI = {
 ## 可选选项
 
 - 三张不可接：最后一手三张/三带一不能管三带二
-- 炸弹不可拆：炸弹不能拆开打别的牌型
 - 红桃十翻倍：♥10 持有者输赢×2
 - 四带三：可以出四张带任意三张
 
@@ -484,7 +484,7 @@ pdkRegisterAI(async (ctx) => {
 | 基础工具 | `buildDeck`（48 张编码 `{i,r,s}`）、`shuffle`（crypto 均匀随机）、牌面 HTML |
 | 牌型分析 | `analyzeShape`：single/pair/triple/t1/t2/straight/pairseq/plane/planeBare/bomb/quad3 |
 | 比较 | `canBeat`：同型同长比 key；炸弹压一切；三张家族交叉规则 |
-| 上下文校验 | `comboContextOK`（最后一手限制）、`breaksBomb`（炸弹不可拆）、`violatesBaodan`（防放水） |
+| 上下文校验 | `comboContextOK`（最后一手限制）、`breaksBomb`（炸弹不可拆·仅旧局兼容，新版恒不触发）、`violatesBaodan`（防放水） |
 | 候选生成 | `genLeads`（自由出牌）/ `genBeats`（跟牌）→ `legalPlays` 统一过滤去重 |
 | AI | `estimatePlays`（剩余手数）+ `scoreCandidate`（打分）+ `aiCandidates`；外挂入口 `pdkRegisterAI` |
 | AI 桥接 | `bridge*` 系列函数：影子牌局同步、`/act` 决策、`/suggest` 提示、失步重放、断桥降级 |
