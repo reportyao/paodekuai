@@ -34,9 +34,13 @@ import sys
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
-# 目录 -> 编号前缀：A=人机局（主站） H=真人局（在线房） E=外部 API 调用方
+# 目录 -> 编号前缀：A=16张人机局（主站） H=真人局（在线房） E=外部 API 调用方
+#                    B=15张人机局（pdk45 玩法，独立目录+独立编号空间，与16张物理隔离）
 DIRS = [(BASE / "data" / "replays", "A"), (BASE / "data" / "online", "H"),
-        (BASE / "data" / "external", "E")]
+        (BASE / "data" / "external", "E"), (BASE / "data" / "replays15", "B")]
+# 编号前缀 -> 玩法牌档（张数）：列表中每局都会带 deck 字段，前后端据此分区展示
+DECK_OF_PREFIX = {"A": 16, "H": 16, "E": 16, "B": 15}
+DECK15_DIR = BASE / "data" / "replays15"
 COMMENT_DIR = BASE / "data" / "comments"
 COMMENT_JSONL = BASE / "data" / "human_reviews.jsonl"
 RANK = "3456789XJQKA2"
@@ -172,6 +176,7 @@ _SUMMARY_KEYS = ("no", "live", "aborted", "winner", "api", "caller", "source", "
 
 def _summary_of(d: dict, path, prefix: str, st) -> dict:
     row = {"file": path.name, "_path": str(path), "_prefix": prefix,
+           "deck": int(d.get("deck") or DECK_OF_PREFIX.get(prefix, 16)),
            "_mtime": st.st_mtime, "_size": st.st_size,
            "_epoch": _epoch(d, st.st_mtime),
            "sid": str(d.get("sid") or path.stem),
@@ -205,7 +210,7 @@ def _save_index(rows: dict) -> None:
 _INDEX["rows"] = _load_index_file()
 
 
-def load_summaries(refresh: bool = True) -> list[dict]:
+def load_summaries(refresh: bool = True, deck: int | None = None) -> list[dict]:
     """轻量对局列表（新→旧）：只解析**新增/改动**的文件，其余直接用索引缓存。
 
     列表与统计只需要每局摘要（编号/时间/胜负/手数/点评数…）。以前每次都把 data/replays
@@ -220,6 +225,8 @@ def load_summaries(refresh: bool = True) -> list[dict]:
         rows = _INDEX["rows"]
         seen = set()
         for d, prefix in DIRS:
+            if deck is not None and int(DECK_OF_PREFIX.get(prefix, 16)) != int(deck):
+                continue
             if not d.exists():
                 continue
             for p in d.glob("*.json"):
@@ -253,7 +260,7 @@ def moves_count(g: dict) -> int:
     return len(g.get("moves") or g.get("codes") or [])
 
 
-def find_by_id(gid: str, sid: str = "") -> dict | None:
+def find_by_id(gid: str, sid: str = "", deck: int | None = None) -> dict | None:
     """按编号或文件名(sid)定位对局。
 
     sid 优先且精确：历史数据里存在"一个编号对应两局"（编号分配竞态遗留），
@@ -263,6 +270,9 @@ def find_by_id(gid: str, sid: str = "") -> dict | None:
     gid = (gid or "").strip().upper()
     sid = (sid or "").strip().lower()
     games = load_games()
+    if deck is not None:                       # 指定玩法时只在对应目录里找（15/16 互不串档）
+        allowed = {p for p, pref in DIRS if int(DECK_OF_PREFIX.get(pref, 16)) == int(deck)}
+        games = [g for g in games if Path(g.get("_path", "")).parent in allowed]
     if sid:
         for d in games:
             if str(d.get("_file", "")).lower() == sid + ".json" or                str(d.get("sid", "")).lower() == sid:
@@ -273,20 +283,114 @@ def find_by_id(gid: str, sid: str = "") -> dict | None:
     return None
 
 
+def save_game15(payload: dict) -> dict:
+    """保存一局 15 张（pdk45）人机对局（前端上传，服务端权威结算）。
+
+    payload: {hands:[[id..],[id..]], kitty:[id..], leader, opts, moves:[{seat,cards,pass,combo}],
+              winner, mode, names?, timeText?, sid?, durationSec?}
+    写入 data/replays15/<sid>.json，编号 B#### —— 目录与编号都与 16 张（A/H/E）物理隔离。
+    """
+    import settle as _settle
+    hands = payload.get("hands") or []
+    if len(hands) != 2 or not all(isinstance(h, list) for h in hands):
+        raise ValueError("hands 必须是 [座位0手牌, 座位1手牌]")
+    if len(hands[0]) != 15 or len(hands[1]) != 15:
+        raise ValueError(f"15张玩法：两手牌各需 15 张（当前 {len(hands[0])}/{len(hands[1])}）")
+    moves = payload.get("moves")
+    if not isinstance(moves, list) or not moves:
+        raise ValueError("moves 必填（逐手明细）")
+    winner = payload.get("winner")
+    if winner not in (0, 1):
+        raise ValueError("winner 必须是 0 或 1")
+    opts = payload.get("opts") or {}
+    res = _settle.compute_result(hands, moves, opts, winner)
+    no = str(payload.get("no") or "").upper()
+    if not (no.startswith("B") and no[1:].isdigit()):
+        no = allocate_no("B")
+    sid = str(payload.get("sid") or uuid_hex())[:16]
+    DECK15_DIR.mkdir(parents=True, exist_ok=True)
+    doc = {
+        "no": no, "deck": 15, "version": 2, "source": "h5_15",
+        "sid": sid, "timeText": payload.get("timeText") or _now_text(),
+        "ts": payload.get("ts") or _now_iso(),
+        "names": payload.get("names") or ["human", "ai"],
+        "mode": payload.get("mode") or "hybrid", "net": payload.get("net") or "",
+        "playMode": payload.get("playMode") or "ai",       # ai=人机 / hotseat=热座
+        "humanSeat": 0,
+        "hands": hands, "kitty": payload.get("kitty") or [],
+        "leader": int(payload.get("leader") or 0), "opts": opts,
+        "moves": moves, "winner": int(winner),
+        "result": res, "scores": res["delta"],
+        "durationSec": payload.get("durationSec"),
+        "engine": payload.get("engine") or "pdk45",        # 决策来源：15张深度模型
+    }
+    path = DECK15_DIR / f"{sid}.json"
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+    return {"no": no, "sid": sid, "deck": 15, "result": res}
+
+
+def _now_text() -> str:
+    import time as _t
+    return _t.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _now_iso() -> str:
+    import time as _t
+    return _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime())
+
+
+def uuid_hex() -> str:
+    import uuid as _u
+    return _u.uuid4().hex
+
+
+def allocate_no(prefix: str = "B") -> str:
+    """给某牌档目录分配下一个编号（扫描目录取最大值+1；带进程内锁）。"""
+    d = dict(DIRS).get(prefix) if False else None
+    for dd, pref in DIRS:
+        if pref == prefix:
+            d = dd
+            break
+    if d is None:
+        raise ValueError(f"未知编号前缀 {prefix}")
+    with _INDEX_LOCK:
+        mx = 0
+        if d.exists():
+            for p in d.glob("*.json"):
+                try:
+                    no = str(json.loads(p.read_text(encoding="utf-8")).get("no", ""))
+                except Exception:
+                    continue
+                if no.startswith(prefix) and no[len(prefix):].isdigit():
+                    mx = max(mx, int(no[len(prefix):]))
+        return f"{prefix}{mx + 1:04d}"
+
+
 # ---------------- 人工点评 ----------------
+
+def deck_of_no(no: str) -> int:
+    """从编号前缀判断玩法牌档（B=15张，其余=16张）。"""
+    no = str(no or "").strip().upper()
+    return int(DECK_OF_PREFIX.get(no[:1], 16))
+
 
 def comment_path(no: str) -> Path:
     return COMMENT_DIR / f"{no}.json"
 
 
-def load_comments(no: str) -> list:
+def load_comments(no: str, deck: int | None = None) -> list:
     p = comment_path(no)
     if not p.exists():
         return []
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        arr = json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         return []
+    if deck is not None:                       # 编号空间已隔离；再按记录里的 deck 双保险
+        arr = [c for c in arr if int(c.get("deck") or deck_of_no(no)) == int(deck)]
+    return arr
 
 
 def save_comment(no: str, text: str, ply=None, author: str = "人工",
@@ -296,7 +400,8 @@ def save_comment(no: str, text: str, ply=None, author: str = "人工",
     rec = {
         "source": "human_review",     # 标记：人工复盘产物（AI 学习信号）
         "kind": kind,                 # human_comment / human_tag …
-        "no": no,                     # 对局唯一编号（定位）
+        "deck": deck_of_no(no),       # 玩法牌档：16=经典48张 / 15=pdk45 玩法（分区标记）
+        "no": no,                     # 对局唯一编号（定位；B 开头=15张）
         "ply": ply,                   # 针对第几手；None=整局点评
         "text": str(text).strip(),
         "author": author,
@@ -358,9 +463,11 @@ def code_str(code: int) -> str:
 
 
 def kind_of(d: dict) -> str:
+    deck = int(d.get("deck") or DECK_OF_PREFIX.get(d.get("_prefix", "A"), 16))
     if d.get("_prefix") == "E" or d.get("api") or d.get("caller"):
-        return "对外"
-    return "真人" if d.get("source") == "online_room" else "人机"
+        return "对外" if deck == 16 else f"对外·{deck}张"
+    base = "真人" if d.get("source") == "online_room" else "人机"
+    return base if deck == 16 else f"{base}·{deck}张"
 
 
 def participants(d: dict) -> str:

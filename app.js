@@ -24,7 +24,9 @@ const S = {
   lastWinner: null, phase: 'idle',             // 'idle'|'playing'|'roundEnd'|'matchEnd'
   awaiting: null,                              // 热座：等待确认看牌的座位
   selected: new Set(), hints: [], hintIdx: -1,
+  currentSid: null,                            // 本局服务端会话/存档号（15张局上传后写入）
   bridgeMode: false, roundLeader: 0,           // AI 机器人桥接状态 / 本局先手
+  ai15Ready: false, ai15Checked: false, ai15Mode: '',   // 15张：pdk45 服务健康/是否已探测/本局模式（牌桌标签）
   aiBlocked: false, aiErrorMsg: '',             // 不降级：AI 异常时暂停本局
   revealOpp: false,                            // 测试：实时明牌对手手牌
   replay: null, replayArchive: [],
@@ -66,6 +68,14 @@ function isDeck15() { return S.deckSpec === 15; }
 function sortHand(h) { h.sort((a, b) => b.r - a.r || a.s - b.s); return h; }
 function removeCards(hand, cards) { const ids = new Set(cards.map(c => c.i)); return hand.filter(c => !ids.has(c.i)); }
 function cardText(c) { return SUITS[c.s] + RANK_NAME[c.r]; }
+/* 牌 id（引擎/bot 口径，与 16 张牌谱一致）：44/45/46=♥♣♦A，48=♠2，其余 (r-3)<<2|s */
+const CARD_BY_ID = (() => { const m = {}; buildDeck().forEach(c => { m[c.i] = c; }); return m; })();
+function toBotId(id) { const c = CARD_BY_ID[id]; return c ? toBotCard(c) : id; }
+function botIdCard(id) {
+  if (id === 48) return { r: 15, s: 0 };
+  if (id >= 44 && id <= 46) return { r: 14, s: id - 43 };   // 44→♥ 45→♣ 46→♦
+  return { r: (id >> 2) + 3, s: id & 3 };
+}
 function isRed(c) { return c.s === 1 || c.s === 3; }
 function cardHTML(c, mini) {
   return `<div class="card ${mini ? 'mini' : ''} ${isRed(c) ? 'red' : ''}" data-id="${c.i}">` +
@@ -835,6 +845,14 @@ async function ai15Health(timeoutMs = 6000) {
   } catch (e) { return null; }
 }
 
+function ai15SetStatus(ok, mode) {
+  if (S.ai15Ready === ok && S.ai15Checked && (!ok || S.ai15Mode === mode)) return;
+  S.ai15Ready = ok;
+  S.ai15Checked = true;                                 // 已知状态（区分"连接中"与"已失败"）
+  if (mode) S.ai15Mode = mode;
+  if (S.screen === 'game' && S.mode === 'ai') render();  // 牌桌标签即时更新
+}
+
 function ai15Trick(seat) {
   if (!S.last || S.last.by === seat) return null;        // 领出/自己刚出的（全过回手）-> 无待跟牌型
   return comboToTrick(S.last.combo);                     // len/nc 语义已按引擎口径修正
@@ -901,7 +919,9 @@ async function aiMove() {
     let ids = null;
     try {
       ids = await ai15Decide(seat);
+      ai15SetStatus(true);                        // 决策成功 = 服务在线（标签即时转正）
     } catch (e) {
+      ai15SetStatus(false);
       aiError('15张深度 AI 决策失败：' + (e && e.message ? e.message : e));
       return;
     }
@@ -982,6 +1002,7 @@ async function aiRetry() {
   if (isDeck15()) {                                    // 15张：直接探活，通过即续局
     const h = await ai15Health(8000);
     if (h) {
+      ai15SetStatus(true, h.mode || '');
       S.aiBlocked = false; S.aiErrorMsg = '';
       toast('15张 AI 服务已恢复，继续对局', 2200);
       render(); beginTurn();
@@ -1144,6 +1165,11 @@ function trickToCombo(t4) {
   const map = { 0: 'single', 1: 'pair', 2: 'pairseq', 3: 'triple', 4: 't2', 5: 't1', 6: 'plane', 7: 'straight', 8: 'bomb', 9: 'quad3' };
   return { t: map[t4[0]] || 'single', key: t4[1] === 12 ? 15 : t4[1] + 3, len: t4[2] };
 }
+function comboMeta(combo) {
+  /* analyzeShape 的 combo({t,key,len,k}) -> 存档用 {ptype,main,len,nc}（与 trick 同口径） */
+  const t = comboToTrick(combo);
+  return { ptype: t[0], main: t[1], len: t[2], nc: t[3], text: comboName(combo) };
+}
 function comboToTrick(combo) {
   /* trick = [ptype, main, len, nc]，len 语义随牌型（2026-09-19 对 pdk45/std48 双档实测定准）：
    * 连对=对数、飞机=三张组数、其余=张数；nc=附带张数（三带一1/三带二2/四带三3/飞机翼数）。 */
@@ -1300,9 +1326,11 @@ function startMatch() {
   if (S.mode === 'ai') { S.names = ['我', '电脑']; S.avatars = ['🙂', '🤖']; }
   else { S.names = ['玩家一', '玩家二']; S.avatars = ['🧑', '👦']; }
   if (isDeck15()) {
-    if (S.mode === 'ai') ai15Health().then(h =>
+    if (S.mode === 'ai') ai15Health().then(h => {
+      ai15SetStatus(!!h, (h && h.mode) || '');
       toast(h ? '🤖 已接入 15 张深度 AI（pdk45 · ' + (h.mode || 'hybrid') + '）'
-              : '⛔ 15张 AI 服务未连接：对局将暂停并提示重试（不降级）', 3000));
+              : '⛔ 15张 AI 服务未连接：对局将暂停并提示重试（不降级）', 3000);
+    });
   } else bridgeHealth().then(ok => {
     if (S.mode === 'ai') toast(ok ? '🤖 已接入生产版 AI 机器人（hybrid / dual 双模式）'
                                    : '⛔ AI 服务未连接：对局将暂停并提示重试（不降级）', 3000);
@@ -1322,6 +1350,8 @@ function startRound() {
   S.kitty = deck.slice(0, kittyN);
   S.hands = [sortHand(deck.slice(kittyN, kittyN + handN)), sortHand(deck.slice(kittyN + handN, kittyN + 2 * handN))];
   S.initialHands = [S.hands[0].slice(), S.hands[1].slice()];
+  S.roundStartTs = Date.now();
+  S.currentSid = null;
   S.roundMoves = [];
   S.roundNo++;
   S.last = null; S.shown = [null, null];
@@ -1571,15 +1601,18 @@ const PTT = { 0: '单张', 1: '对子', 2: '连对', 3: '三张', 4: '三带二'
 const RV_RANK = '3456789XJQKA2';
 const RV_SUIT = '♠♥♣♦';
 
-function rvCardText(ids) { return (ids || []).map(c => RV_SUIT[c & 3] + RV_RANK[c >> 2]).join(' '); }
+function rvCardText(ids) { return (ids || []).map(c => { const k = botIdCard(c); return RV_SUIT[k.s] + RV_RANK[k.r - 3]; }).join(' '); }
 
 let HS_SCOPE = 'mine';                                  // mine=我的对局(A/H)  api=对外调用(E)
+let HS_DECK = 'all';                                    // all=全部玩法  16=经典48张  15=pdk45 玩法（B编号）
 let HS_LIMIT = 50;                                      // 列表默认只拉最新 50 条（手机端少下 7 倍数据）
 let HS_TOTAL = 0;
 
-async function showReplayHistory(scope) {
+async function showReplayHistory(scope, deck) {
   if (scope && scope !== HS_SCOPE) { HS_SCOPE = scope; HS_LIMIT = 50; }
   if (scope) HS_SCOPE = scope;
+  if (deck != null && String(deck) !== String(HS_DECK)) { HS_DECK = String(deck); HS_LIMIT = 50; }
+  if (deck != null) HS_DECK = String(deck);
   const box = $('history-list');
   const sbox = $('history-stats');
   box.innerHTML = '<div class="hint-modal-desc">加载中…</div>';
@@ -1587,13 +1620,17 @@ async function showReplayHistory(scope) {
   $('history-modal').classList.remove('hidden');
   $('hs-mine').classList.toggle('active', HS_SCOPE === 'mine');
   $('hs-api').classList.toggle('active', HS_SCOPE === 'api');
+  ['all', '16', '15'].forEach(k => {
+    const el = $('hs-deck-' + k);
+    if (el) el.classList.toggle('active', String(HS_DECK) === k);
+  });
   try {
-    const r = await fetch('/replays/list?scope=' + HS_SCOPE + '&limit=' + HS_LIMIT).then(x => x.json());
+    const r = await fetch('/replays/list?scope=' + HS_SCOPE + '&deck=' + HS_DECK + '&limit=' + HS_LIMIT).then(x => x.json());
     HS_TOTAL = (r && (r.total != null ? r.total : (r.games || []).length)) || 0;
     const games = (r && r.games) || [];
     // 统计条：对外场次看调用方胜负，我的场次看我的胜负与点评数
     try {
-      const st = await fetch('/replays/stats?scope=' + HS_SCOPE).then(x => x.json());
+      const st = await fetch('/replays/stats?scope=' + HS_SCOPE + '&deck=' + HS_DECK).then(x => x.json());
       if (sbox && st && st.summary) {
         // 与列表口径一致：列表默认只显示最新 HS_LIMIT 条，这里标注清楚
         if (HS_TOTAL) st.summary.shown_note = '已显示 ' + Math.min(HS_LIMIT, HS_TOTAL) + '/' + HS_TOTAL + ' 局';
@@ -1624,15 +1661,15 @@ async function showReplayHistory(scope) {
     // 同一编号出现多次（历史编号撞号遗留）时，追加会话短号以便区分，并在复盘时精确锁定
     const dupCount = {};
     games.forEach(g => { dupCount[g.no] = (dupCount[g.no] || 0) + 1; });
-    box.innerHTML = games.map(g => `<div class="res-line rv-row" data-no="${g.no}" data-sid="${g.sid || g.file || ''}">
-        <span class="rv-no">${g.no}${dupCount[g.no] > 1 && (g.sid || g.file) ? `<em class="rv-sid">·${String(g.sid || g.file).slice(0, 4)}</em>` : ''}</span>
+    box.innerHTML = games.map(g => `<div class="res-line rv-row" data-no="${g.no}" data-sid="${g.sid || g.file || ''}" data-deck="${g.deck || 16}">
+        <span class="rv-no">${g.no}${dupCount[g.no] > 1 && (g.sid || g.file) ? `<em class="rv-sid">·${String(g.sid || g.file).slice(0, 4)}</em>` : ''}<em class="rv-deck d${g.deck || 16}">${g.deck || 16}张</em></span>
         <span class="v">${g.time} ｜ ${g.kind} ｜ ${g.participants} ｜ ${g.moves}手 ｜ ${g.result}${
           dupCount[g.no] > 1 ? '' : ''}</span>
         <span class="rv-badge${g.comments ? '' : ' hidden'}">✍️${g.comments}</span>
         <button class="btn ghost small">复盘</button>
       </div>`).join('');
     box.querySelectorAll('.rv-row').forEach(el =>
-      el.addEventListener('click', () => openReview(el.dataset.no, el.dataset.sid)));
+      el.addEventListener('click', () => openReview(el.dataset.no, el.dataset.sid, el.dataset.deck)));
     // 只加载最新 N 条：还有更早的局时给一个"加载更多"（每次 +50）
     if (HS_TOTAL > games.length) {
       const more = document.createElement('button');
@@ -1664,12 +1701,15 @@ async function exportAllReplays() {
 }
 
 /* ---- 逐手复盘查看器 ---- */
-async function openReview(no, sid) {
+async function openReview(no, sid, deck) {
   $('rv-move').textContent = '加载中…';
   $('review-modal').classList.remove('hidden');
   let data;
   // sid 用于精确锁定会话：历史数据里有"一编号两局"，只按编号会打开另一局（与真实出牌对不上）
-  const q = '/replays/get?no=' + encodeURIComponent(no) + (sid ? '&sid=' + encodeURIComponent(sid) : '');
+  // deck 用于玩法分区：B 编号=15张，A/H/E=16张（留空则按编号前缀自动判定）
+  const dk = deck || (/^B/i.test(String(no)) ? '15' : '');
+  const q = '/replays/get?no=' + encodeURIComponent(no)
+    + (sid ? '&sid=' + encodeURIComponent(sid) : '') + (dk ? '&deck=' + dk : '');
   try { data = await fetch(q).then(x => x.json()); }
   catch { toast('复盘加载失败'); return; }
   if (!data || !data.game) { toast((data && data.error) || '复盘加载失败'); return; }
@@ -1718,6 +1758,9 @@ async function openReview(no, sid) {
 
   $('rv-explain-box').classList.add('hidden');
   $('rv-explain-box').innerHTML = '';
+  // 15张：AI 逐手解析走的是 16 张桥，暂不可用（隐藏按钮）；点评不受影响
+  const exBtn = $('rv-explain');
+  if (exBtn) exBtn.classList.toggle('hidden', Number(g.deck || 15) === 15);
   const sel = $('rv-comment-ply');
   sel.innerHTML = '<option value="">整局点评</option>' + seq.map((m, i) =>
     `<option value="${i + 1}">第${i + 1}手（${names[m.seat] || '座位' + m.seat}）</option>`).join('');
@@ -1749,8 +1792,8 @@ function renderReview() {
 function rvHandHTML(cards) {
   if (!cards.length) return '<span class="rv-empty">（已出完）</span>';
   return cards.map(c => {
-    const red = (c & 3) === 1 || (c & 3) === 3;
-    return `<span class="rv-card${red ? ' red' : ''}">${RV_RANK[c >> 2]}<i>${RV_SUIT[c & 3]}</i></span>`;
+    const k = botIdCard(c), red = k.s === 1 || k.s === 3;
+    return `<span class="rv-card${red ? ' red' : ''}">${RV_RANK[k.r - 3]}<i>${RV_SUIT[k.s]}</i></span>`;
   }).join('');
 }
 
@@ -1787,12 +1830,14 @@ async function saveReviewComment() {
 
 /* ---- 对局页：复盘当局 / 复盘上一局 ---- */
 async function reviewCurrentGame() {
-  if (!bridge.no) {
-    toast('本局暂无编号（AI 服务未连接或这是第一手前）');
+  const no = isDeck15() ? S.currentNo : bridge.no;  // 15张：编号来自存档（B####）
+  if (!no) {
+    toast(isDeck15() ? '本局暂无编号（15张存档未完成或对局还在进行）'
+                     : '本局暂无编号（AI 服务未连接或这是第一手前）');
     return;
   }
   RV.from = 'game';
-  await openReview(bridge.no, bridge.sid);          // 带 sid：同号时锁定"本局"这个会话
+  await openReview(no, isDeck15() ? S.currentSid : bridge.sid, isDeck15() ? '15' : '');
   // 默认定位到最新一手，方便就当前局面写点评
   if (RV.total > 0) { RV.step = RV.total; renderReview(); }
   const sel = $('rv-comment-ply');
@@ -1802,6 +1847,7 @@ async function reviewCurrentGame() {
 
 async function reviewPreviousGame() {
   RV.from = 'game';
+  const dk = isDeck15() ? '15' : '';
   let no = S.prevRoundNo || null, sid = S.prevRoundSid || null;
   if (!no) {
     // 没打过上一局 -> 取最近一局已结束的对局
@@ -1889,6 +1935,29 @@ function settle(winner) {
   S.total[winner] += dW; S.total[loser] += dL;
   return { winner, loser, rem, shut, base, bw, bl, dW, dL, redTxt };
 }
+/* 15张（pdk45）对局上传存档：服务端权威结算 + B 编号（与 16 张 A/H/E 物理隔离）。
+ * 失败不影响本地结算与展示（本地存档照旧），但会提示"未存档到服务器"。 */
+async function archive15Round(winner) {
+  const hands = S.initialHands.map(h => h.map(c => toBotCard(c)));       // 存 bot id（与16张牌谱同口径）
+  const moves = S.roundMoves.map(m => ({
+    seat: m.seat,
+    cards: (m.cards || []).map(id => toBotId(id)),
+    pass: !!m.pass,
+    combo: m.combo ? comboMeta(m.combo) : null,
+  }));
+  const body = {
+    deck: 15, hands, kitty: S.kitty.map(c => toBotCard(c)), leader: S.roundLeader,
+    opts: { ...S.opts }, moves, winner,
+    mode: 'pdk45', playMode: S.mode, names: S.names.slice(), engine: 'pdk45',
+    durationSec: S.roundStartTs ? Math.round((Date.now() - S.roundStartTs) / 1000) : null,
+  };
+  const r = await fetch('/replays/save', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(x => x.json());
+  if (!r || !r.ok) throw new Error((r && r.error) || '存档失败');
+  return r;                                   // {ok, no, sid, deck, result}
+}
+
 function endRound(winner) {
   S.prevRoundNo = S.currentNo || null;      // 本局结束 -> 成为“上一局”
   S.prevRoundSid = bridge.sid || null;      // 连同会话号记下：同号时"复盘上局"才打得准
@@ -1907,6 +1976,16 @@ function endRound(winner) {
   };
   S.replayArchive.push(replay);
   saveReplay(replay);
+  if (isDeck15()) {                                    // 15张：上传服务器存档（拿 B 编号）
+    archive15Round(winner).then(r => {
+      S.currentNo = r.no || null; S.currentSid = r.sid || null;
+      S.prevRoundNo = S.currentNo; S.prevRoundSid = S.currentSid;
+      render();
+    }).catch(e => {
+      console.warn('[Replay15] 存档失败', e);
+      toast('⚠ 本局未能存档到服务器（' + (e && e.message ? e.message : e) + '），本地记录仍在', 3200);
+    });
+  }
   S.history.push({ no: S.roundNo, winner: r.winner, rem: r.rem, shut: r.shut, base: r.base, bw: r.bw, bl: r.bl, redTxt: r.redTxt, d0, d1 });
   render();
   showRoundModal(r);
@@ -2026,8 +2105,11 @@ function render() {
   const oppTags = [];
   if (S.mode === 'ai') oppTags.push('<span class="tag ai">' +
     (S.aiBlocked ? 'AI·已暂停（待重试）'
-                 : (S.bridgeMode ? 'AI·' + (bridge.mode === 'dual' ? '净分优先' : '胜率优先')
-                                 : 'AI·未连接（已暂停）')) + '</span>');
+      : isDeck15()                                   // 15张走 pdk45 平台流（不经 16 张桥）
+        ? (S.ai15Ready ? 'AI·15张深度（' + (S.ai15Mode === 'dual' ? '净分优先' : '胜率优先') + '）'
+                       : (S.ai15Checked ? 'AI·未连接（已暂停）' : 'AI·连接中…'))
+        : (S.bridgeMode ? 'AI·' + (bridge.mode === 'dual' ? '净分优先' : '胜率优先')
+                        : 'AI·未连接（已暂停）')) + '</span>');
   else oppTags.push('<span class="tag human">真人</span>');
   $('opp-tags').innerHTML = oppTags.join('');
   $('seat-opp').classList.toggle('turn', S.turn === opp && S.phase === 'playing');
@@ -2246,7 +2328,7 @@ function syncDeckSpecUI() {
     : '两人对战 · 48张牌 · 黑桃2最大 · 黑桃3先出 · 有牌必打';
   $('btn-selftest').classList.toggle('hidden', false);               // 两档都有链路自检（15张走 /ai15）
   document.querySelectorAll('.rev-btn').forEach(b =>
-    b.classList.toggle('hidden', S.deckSpec === 15));                // 服务端复盘仅覆盖16张局
+    b.classList.toggle('hidden', false));                            // 15张也有服务端存档（B 编号），复盘可用
   bfSyncBtn();
   refreshAIVersion();                                                // 版本行随牌副切换（15张显示"简易AI/接口预留"）
 }

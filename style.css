@@ -394,6 +394,12 @@ button { font-family: inherit; }
 .st-bad { color: #ffb35c; font-weight: 700; }
 .hs-stats b { color: #ffd88e; }
 .rv-no em.rv-sid { font-style: normal; font-size: 11px; color: #9fc7e8; opacity: .85; }
+/* 对局记录：玩法徽标（15张/16张 一眼区分） */
+.rv-deck { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 6px;
+  font-size: 10px; font-style: normal; line-height: 15px; vertical-align: 1px;
+  background: rgba(255,255,255,.12); color: #cfd8e3; }
+.rv-deck.d15 { background: rgba(120,200,255,.22); color: #bfe6ff; }
+.rv-deck.d16 { background: rgba(255,214,120,.18); color: #ffe6b0; }
 .rv-explain .rv-diff { color: #ffb35c; }
 .explain-loading { color: #9fc7e8; font-size: 12px; }
 @media (max-width: 760px) {

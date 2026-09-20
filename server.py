@@ -131,13 +131,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         try:
             if u.path == "/replays/list":
                 scope = (q.get("scope") or ["mine"])[0]
+                dk_raw = (q.get("deck") or ["all"])[0]           # all|16|15：玩法分区（B编号=15张）
+                dk = None if str(dk_raw).lower() in ("all", "", "0") else int(dk_raw)
                 show_all = (q.get("all") or ["0"])[0] in ("1", "true", "yes")   # all=1 时连未成局也列出来
                 # 默认只返回最新 50 条：以前全量 360KB，手机端打开要好几秒
                 lim_raw = (q.get("limit") or ["50"])[0]
                 limit = None if str(lim_raw).lower() in ("all", "0", "-1") else max(1, int(lim_raw or 50))
                 cidx = replay_report.comments_index()
                 games = []
-                for d in replay_report.load_summaries():
+                for d in replay_report.load_summaries(deck=dk):
                     # 复盘只列"真正打完/正在进行"的局：空局（一手未打）与中途退出（无胜负）默认不出现，
                     # 否则列表里全是没意义的碎片（历史遗留已清理到 data/_trash_*，此处防止再生）。
                     if not show_all:
@@ -155,7 +157,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     tag = (f"{d['code']}-r{d['round']}" if d.get("source") == "online_room"
                            else str(d.get("sid", d.get("_file", "")))[:10])
                     games.append({
-                        "no": no, "time": replay_report.time_of(d),
+                        "no": no, "deck": int(d.get("deck") or 16),
+                        "time": replay_report.time_of(d),
                         "kind": replay_report.kind_of(d), "tag": tag,
                         "participants": replay_report.participants(d),
                         "moves": replay_report.moves_count(d),
@@ -175,13 +178,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if limit is not None:
                     games = games[:limit]
                 return {"games": games, "total": total, "limit": (limit if limit is not None else total),
-                        "shown": len(games), "scope": scope}
+                        "shown": len(games), "scope": scope, "deck": (dk or "all")}
 
             if u.path == "/replays/stats":
                 # 管理后台用的胜负汇总（含按调用方/按天分组）
                 scope = (q.get("scope") or ["mine"])[0]
+                dk_raw = (q.get("deck") or ["all"])[0]
+                dk = None if str(dk_raw).lower() in ("all", "", "0") else int(dk_raw)
                 games = []
-                for d in replay_report.load_summaries():
+                for d in replay_report.load_summaries(deck=dk):
                     is_api = bool(d.get("api") or d.get("_prefix") == "E")
                     if scope == "mine" and is_api:
                         continue
@@ -202,7 +207,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if u.path == "/replays/get":
                 no = (q.get("no") or [""])[0]
                 sid = (q.get("sid") or q.get("file") or [""])[0]      # 可选：精确锁定会话（重号时必需）
-                d = replay_report.find_by_id(no, sid)
+                dk_raw = (q.get("deck") or [""])[0]                   # 玩法分区；留空=按编号前缀自动
+                dk = int(dk_raw) if str(dk_raw).isdigit() else (replay_report.deck_of_no(no) if no else None)
+                d = replay_report.find_by_id(no, sid, dk)
                 if not d:
                     return {"error": f"找不到对局 {no}"}
                 game = {k: v for k, v in d.items() if not k.startswith("_")}
@@ -214,7 +221,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                          "text": replay_report.code_str(cd), "pass": cd == 0}
                         for i, cd in enumerate(game["codes"])
                     ]
-                return {"game": game, "comments": replay_report.load_comments(str(d.get("no", "")))}
+                return {"game": game, "comments": replay_report.load_comments(str(d.get("no", "")), dk)}
+            if u.path == "/replays/save" and method == "POST":
+                n = int(self.headers.get("Content-Length", 0) or 0)
+                raw = self.rfile.read(n) or b"{}"
+                try:
+                    payload = json.loads(raw.decode("utf-8"))
+                except UnicodeDecodeError:
+                    payload = json.loads(raw.decode("gbk", "replace"))
+                # 只接受 15 张玩法上传（16 张由桥在服务端落盘，不走这里，避免两套写入打架）
+                if int(payload.get("deck") or 0) != 15:
+                    return {"error": "该接口只接受 deck=15 的 15张玩法对局"}
+                try:
+                    out = replay_report.save_game15(payload)
+                except ValueError as e:
+                    return {"error": str(e)}
+                return {"ok": True, **out}
             if u.path == "/replays/comment" and method == "POST":
                 n = int(self.headers.get("Content-Length", 0) or 0)
                 raw = self.rfile.read(n) or b"{}"
@@ -229,9 +251,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 ply = payload.get("ply")
                 ply = int(ply) if ply not in (None, "", "null") else None
                 author = str(payload.get("author", "") or "人工")[:12]
+                dk = replay_report.deck_of_no(no)                  # 编号前缀决定牌档（B=15张）
                 rec = replay_report.save_comment(no, text, ply, author)
                 return {"ok": True, "saved": rec,
-                        "comments": replay_report.load_comments(no)}
+                        "comments": replay_report.load_comments(no, dk)}
             return {"error": "unknown replays endpoint"}
         except Exception as e:
             return {"error": str(e)}
