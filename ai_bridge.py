@@ -1682,7 +1682,9 @@ def _decide_core(payload: dict, cfg, mode: str = "hybrid") -> dict:
         raise ApiError(f"history 过长（{len(history)} > {MAX_HISTORY}）")
     t4 = _check_trick(payload.get("trick"), cfg)
 
-    st = bot_server._replay_decide_history(my_ids, opp_n, history, cfg, choice_alpha=0.4)
+    kitty = check_cards(payload.get("kitty") or [])
+    st = bot_server._replay_decide_history(my_ids, opp_n, history, cfg, choice_alpha=0.4,
+                                           kitty_ids=kitty or None)
     belief, my_cnt = st["belief"], st["my_cnt"]
 
     fb = bot_server._QFB()
@@ -1708,6 +1710,9 @@ def _decide_core(payload: dict, cfg, mode: str = "hybrid") -> dict:
     # 记牌账本：残局穷举"未见面牌池"必需（无状态路径没有 observe，需从 history 注入；
     # 上游 server._decide 同样处理 —— 漏掉会让穷举按"双方都没出过牌"的错误牌池计算）
     ag._played = [list(st["played_me"]), list(st["played_opp"])]
+    # 批次33 对齐上游 server._decide: 已知扣底要从"未见面牌池"再扣一次 (残局穷举必需);
+    # 此前桥只注入 _played 不注入 _known -> unseen 偏大, 穷举世界集不是真全集。
+    ag._known = list(st.get("known_cnt") or [0] * N_RANKS)
     # 已领出次数写入门控（残缺快照绝不伪开局）
     ag._lead_idx = 10 ** 9 if st["incomplete"] else st["my_lead_count"]
 
