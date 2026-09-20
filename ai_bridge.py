@@ -1688,9 +1688,6 @@ def _decide_core(payload: dict, cfg, mode: str = "hybrid") -> dict:
     belief, my_cnt = st["belief"], st["my_cnt"]
 
     fb = bot_server._QFB()
-    fb.last = st["last_move"]
-    fb.opp_p = st["last_was_pass"]
-    fb.opening = (st["my_lead_count"] == 0) and (not st["incomplete"])
 
     kw = prod_solver_kw()
     try:
@@ -1705,6 +1702,15 @@ def _decide_core(payload: dict, cfg, mode: str = "hybrid") -> dict:
         except Exception:
             pass
     ag.new_game(0, my_cnt, [0] * N_RANKS)
+    # 批次33b: _QFB.new_game 会重置 last/opp_p/opening —— 这三项在 SolverAgent(...)
+    # 之前注入会被 new_game 清掉, 于是**每手 decide 的网络输入都退化**(上一手/是否
+    # 过牌/开局门控丢失, 恒为 0/False/True)。上游 server._decide 同款 bug 已按同一
+    # 口径修复(见 pdk-ai server.py "批次33b" 注释), 桥接侧此前漏改。这里在
+    # new_game 之后重注入。
+    fb.last = st["last_move"]
+    fb.opp_p = st["last_was_pass"]
+    # 仅本局尚未领出过时启用 R3; 残缺快照绝不伪开局
+    fb.opening = (st["my_lead_count"] == 0) and (not st["incomplete"])
     ag.belief = belief
     ag.oracle_cnt = None
     # 记牌账本：残局穷举"未见面牌池"必需（无状态路径没有 observe，需从 history 注入；
