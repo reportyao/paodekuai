@@ -94,6 +94,10 @@ from pdk.engine import Game, counts_of_ids  # noqa: E402
 from pdk.core import SPADE_3                       # noqa: E402
 from pdk.explain import PTYPE_CN, describe_state, pattern_text, rank_name  # noqa: E402
 from pdk.fast import PASS_CODE       # noqa: E402
+# trick=[ptype,main,len,nc] 的语义校验（引擎侧唯一实现 pdk/trickguard.py）。
+# 无状态接口必须过这一道：len 写错（典型: 连对传张数）不报错的话，引擎会按错的长度
+# 去找解，静默退化成"只剩炸弹/过牌"，看起来像 AI 变保守。规则相关分支按调用方 opts。
+from pdk.trickguard import parse_trick as _parse_trick   # noqa: E402
 
 # 生产双模式 (pdk-ai README「当前生产模型与部署清单」):
 #   生产模型 = ckpt/policy_a2c_final56.pt (A2C + 56维动作后特征)
@@ -923,7 +927,7 @@ def _belief_core(payload: dict, cfg) -> dict:
         raise ApiError("history 必须是数组")
     if len(history) > MAX_HISTORY:
         raise ApiError(f"history 过长（{len(history)} > {MAX_HISTORY}）")
-    trick = _check_trick(payload.get("trick"))
+    trick = _check_trick(payload.get("trick"), cfg)
 
     facts: list = []
     try:
@@ -1628,26 +1632,31 @@ def do_decide(p: dict):
 
 
 
-def _check_trick(trick):
-    """trick 校验：[ptype, main, len, nc] 或 null（=领出）。"""
+def _check_trick(trick, cfg=None):
+    """trick 校验：[ptype, main, len, nc] 或 null（=领出）。
+
+    结构 + **语义**双重校验：语义交给引擎自己的 classify 反查（pdk/trickguard.parse_trick），
+    不可能牌型直接 400 并给出正确写法。len 随牌型而变：连对=对数、飞机=三张组数、
+    其余=张数；nc 不参与判定（仅局面哈希）。见 docs/AI_API.md §2.3。
+    规则相关分支（四带三/三张不可接）按调用方 opts 判定，缺省 = 网页默认。
+    """
     if trick in (None, "", [], "null"):
         return None
     if not isinstance(trick, (list, tuple)) or len(trick) != 4:
         raise ApiError("trick 必须是 [ptype, main, len, nc] 或 null")
     try:
-        pt, main, ln, nc = (int(x) for x in trick)
-    except (TypeError, ValueError):
-        raise ApiError("trick 必须是 4 个整数")
-    if not (0 <= pt <= 9) or not (0 <= main <= 12) or not (1 <= ln <= 20) or not (0 <= nc <= 8):
-        raise ApiError("trick 取值越界（ptype 0..9 / main 0..12 / len 1..20 / nc 0..8）")
-    return [pt, main, ln, nc]
+        parsed = _parse_trick(list(trick), cfg if cfg is not None else build_cfg({}))
+    except (ValueError, TypeError) as e:
+        raise ApiError(str(e) or "trick 非法")
+    return list(parsed)
 
 
 def _decide_core(payload: dict, cfg, mode: str = "hybrid") -> dict:
     """与 pdk-ai server._decide 同源的单步决策，但 **规则 cfg 与模式可选**。
 
     为什么自己实现：调用方（网页版/外部）可能带 opts（如"四带三""三张不可接"），而上游 /api/decide
-    用的是模块级 CFG（= Config() 默认）。这里把上游 _decide 的完整流程复刻一遍，关键点
+    用的是模块级 CFG（= Config() 默认；上游 2026-09-20 起也支持 payload.opts 覆盖，见 pdk/trickguard.py，
+    此处保留自实现是为了 mode=dual 与逐候选展示等桥专有字段）。这里把上游 _decide 的完整流程复刻一遍，关键点
     一个不少：belief 由 _replay_decide_history 增量重建（含对手 choice 似然更新）、
     played/plays_cnt/trick 一并还原进 CGame、fallback 的 last/opp_p/opening 门控与
     _lead_idx（残缺快照不伪开局）与生产一致、非法动作回退网络再回退首个合法手。
@@ -1671,7 +1680,7 @@ def _decide_core(payload: dict, cfg, mode: str = "hybrid") -> dict:
         raise ApiError("history 必须是数组")
     if len(history) > MAX_HISTORY:
         raise ApiError(f"history 过长（{len(history)} > {MAX_HISTORY}）")
-    t4 = _check_trick(payload.get("trick"))
+    t4 = _check_trick(payload.get("trick"), cfg)
 
     st = bot_server._replay_decide_history(my_ids, opp_n, history, cfg, choice_alpha=0.4)
     belief, my_cnt = st["belief"], st["my_cnt"]

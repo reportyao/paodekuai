@@ -1171,8 +1171,10 @@ function comboMeta(combo) {
   return { ptype: t[0], main: t[1], len: t[2], nc: t[3], text: comboName(combo) };
 }
 function comboToTrick(combo) {
-  /* trick = [ptype, main, len, nc]，len 语义随牌型（2026-09-19 对 pdk45/std48 双档实测定准）：
-   * 连对=对数、飞机=三张组数、其余=张数；nc=附带张数（三带一1/三带二2/四带三3/飞机翼数）。 */
+  /* trick = [ptype, main, len, nc]，**只有 len 参与判定**（2026-09-20 对 pdk45/std48 双档实测）：
+   *   连对=对数、飞机=三张组数、其余=张数；"同型同长"只对 连对/顺子/飞机 生效。
+   * nc 引擎不参与任何判定（只并入局面哈希，传 0 或引擎 classify 输出都等价），
+   * 这里的 1/2/3/翼数 是历史约定值，保留不动以免改到已落盘棋谱的口径。 */
   const map = { single: 0, pair: 1, pairseq: 2, triple: 3, t2: 4, t1: 5, plane: 6, planeBare: 6, straight: 7, bomb: 8, quad3: 9 };
   const lenFix = { pairseq: combo.len / 2, plane: combo.k || combo.len / 3, planeBare: combo.k || combo.len / 3 };
   const ncFix = { t1: 1, t2: 2, quad3: 3 };

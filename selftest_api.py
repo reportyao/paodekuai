@@ -158,6 +158,16 @@ st, r, _ = call("/api/decide", {"my_hand": [0], "opp_n": 99, "trick": None, "his
 check("opp_n 越界 -> 400", st == 400, (st, r))
 st, r, _ = call("/api/decide", {"my_hand": [0], "opp_n": 16, "trick": [1, 2], "history": []})
 check("trick 形状错 -> 400", st == 400, (st, r))
+# 语义防御（2026-09-20）：连对 len 传张数（4455 传 4）历史上不报错 —— 引擎按"四连对"
+# 去找解，手上没有就直接过牌（legal_count=1），看起来像 AI 变保守。现在必须 400 并给出写法。
+_lo = {"my_hand": [20, 21, 24, 25, 28, 29, 32, 33, 0, 1, 4, 5, 8, 9, 12],
+       "opp_n": 11, "history": []}
+st, r, _ = call("/api/decide", dict(_lo, trick=[2, 2, 4, 0]))
+check("连对 len=张数 -> 400", st == 400 and "trick 不可能" in str(r.get("error", "")), (st, r))
+st, r, _ = call("/api/decide", dict(_lo, trick=[2, 2, 2, 0]))
+check("连对 len=对数 -> 200 且同长有解", st == 200 and len(r.get("move") or []) == 4, (st, r))
+st, r, _ = call("/api/belief", dict(_lo, trick=[2, 2, 4, 0]))
+check("belief 同样拦非法 trick -> 400", st == 400, (st, r))
 st, r, _ = call("/api/decode", {"initial_hands": [[0] * 15, [1] * 16], "first_player": 0, "moves": []})
 check("初始手牌 15 张 -> 400", st == 400, (st, r))
 st, r, _ = call("/api/decode", {"initial_hands": [[0] * 16, [0] * 16], "first_player": 0, "moves": []})
