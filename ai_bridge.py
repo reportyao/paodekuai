@@ -103,7 +103,12 @@ from pdk.trickguard import parse_trick as _parse_trick   # noqa: E402
 #   生产模型 = ckpt/policy_a2c_final56.pt (A2C + 56维动作后特征)
 #   hybrid = SolverAgent(hybrid, threshold=28) + _QFB(final56) + 规则层 R0-R3 —— 胜率优先(生产配置)
 #   dual   = 同上但 SolverAgent(engine='dual', <=14张数值计分接力)      —— 积分制净分优先
-PROD_MODES = ("hybrid", "dual")      # hybrid=上游生产配方（胜率优先→净分）；dual=同配方关胜率带（纯净分）
+PROD_MODES = ("hybrid", "dual")
+
+# 口径统一 #3（2026-09-21）: 是否让 **agent 用当局 cfg**（而非引擎模块默认 Config()）。
+# 默认 "0" = 现行为（agent 用 bot_server.CFG）；置 "1" 后 agent 与 CGame 同规则。
+# 为什么要开关: 这是**行为改动**（改变 AI 内部模拟的规则），按纪律必须可 revert + A/B。
+CFG_FROM_SESSION = __import__("os").environ.get("PDK_CFG_FROM_SESSION", "0") == "1"      # hybrid=上游生产配方（胜率优先→净分）；dual=同配方关胜率带（纯净分）
 
 
 # 可选覆盖（默认严格跟随上游配方；用于 A/B 与上游修复后的快速验证）：
@@ -263,7 +268,7 @@ def verify_assets() -> dict:
     return out
 
 
-def build_prod_agent(mode: str = "hybrid"):
+def build_prod_agent(mode: str = "hybrid", cfg=None):
     """按上游生产配方构建智能体（server.PROD_SOLVER_KW，与 server.build_ai 同源）。
 
     mode="hybrid"：上游生产配方（dual 引擎 + 残局穷举 + 数值计分；胜率优先、同胜率比净分）
@@ -278,14 +283,16 @@ def build_prod_agent(mode: str = "hybrid"):
         raise RuntimeError("生产模型 ckpt/policy_a2c_final56.pt 未加载成功"
                            "（检测到 pdk 内部回退到旧网络）——按不降级策略拒绝服务")
     mode = mode if mode in PROD_MODES else "hybrid"
+    # 口径统一 #3: 开关打开且给了当局 cfg 时，agent 与游戏同规则（否则维持现行为）
+    _cfg = cfg if (CFG_FROM_SESSION and cfg is not None) else bot_server.CFG
     kw = prod_solver_kw()
     if mode == "dual":
         kw.setdefault("win_rate_tol", 2.0)     # hmm: 见下方 setattr（旧内核无此参数）
     try:
-        agent = SolverAgent(fb, bot_server.CFG, **kw)
+        agent = SolverAgent(fb, _cfg, **kw)
     except TypeError:
         # 旧内核不认新参数：退回最小公共集（并保留引擎选择）
-        agent = SolverAgent(fb, bot_server.CFG, total_threshold=kw.get("total_threshold", 28),
+        agent = SolverAgent(fb, _cfg, total_threshold=kw.get("total_threshold", 28),
                             max_rows=kw.get("max_rows", 400000),
                             engine=kw.get("engine", "c"))
     if mode == "dual":
@@ -625,7 +632,7 @@ class Shadow:
             raise ApiError("手牌+底牌必须恰好构成 48 张固定牌库（牌 id 见文档 §2.1）")
         self.game = Game(cfg=self.cfg, first_player=leader, hands=[h0, h1], kitty=k)
         self.cg = fast.CGame(counts_of_ids(h0), counts_of_ids(h1), leader, self.cfg)
-        self.agent, self.mode, self.net = build_prod_agent(self.prod_mode)
+        self.agent, self.mode, self.net = build_prod_agent(self.prod_mode, self.cfg)
         self.ai_seat = 1
         self.agent.new_game(self.ai_seat, list(self.game.cnt[self.ai_seat]))
         self.codes = []
