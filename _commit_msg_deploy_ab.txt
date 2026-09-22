@@ -1,0 +1,38 @@
+线上部署: single_top_rule 按局号分流 A/B 灰度 + H5 对接 + 接口文档更新
+
+一、部署什么（腾讯云 /home/ubuntu/paodekuai, 主站会话实例 :8766）
+  - ai_bridge.py 打两处补丁（外科式, 不改引擎、不改 ckpt）:
+    1) _deploy_ab_top_patch_old.py: 局号 md5%2 确定性分流 -> B 臂注入 single_top_rule=True;
+       /init 返回 variant; /health 增 ab 块(含 mismatch 计数); 默认关(PDK_AB_TOP 未置 1 时完全现行为)
+    2) _deploy_ab_record_patch.py: write_replay 落盘 variant / ab_switch
+       （16 张棋谱由桥落盘, /replays/save 只收 deck=15）
+  - app.js: 记住 bridge.variant 并在链路自检里显示（node --check 通过）
+  - docs/: AI_API.md(换成最新版+补 A/B 与"现网生效范围") + 对外接口文档 md/html 补灰度说明
+
+二、为什么是"外科式"而不是把仓库版桥整体铺上去（重要发现）
+  仓库版桥(ba72992)在导入期 `from pdk.trickguard import parse_trick`, 而线上引擎
+  /home/ubuntu/pdk-ai-prod **没有 pdk/trickguard.py** ⇒ 铺上去一旦重启就是
+  ModuleNotFoundError, AI 直接不可用。实测在 `_verify_ab_top.py` 导入阶段就报出来了
+  （幸好遵循"先验证后重启", 没让 systemd 加载坏文件）。
+  ⇒ **"桥与引擎同批部署"不是建议而是硬约束**; trickguard 的 400 语义校验与
+  PDK_CFG_FROM_SESSION 都因此**尚未生效**（已在文档的"现网生效范围"里如实标注）。
+
+三、怎么验的（三步都过才启用）
+  1) 最小判据 `_verify_ab_top.py`: 分流确定性/50-50、**A 臂 single_top_rule=False、
+     B 臂=True**（防"无声 A/A": 旧内核对未知 kwarg 会 TypeError 回退并静默丢弃）
+  2) 烟测 `_smoke_ab_top.py`: /init 返回 variant, 两次 init 即见 A/B 两臂, 且
+     复盘文件清理干净（1479 -> 1479, 不污染"真人 vs AI"语料）
+  3) `_smoke_record.py`: 新棋谱带 variant='B' / ab_switch='single_top_rule'
+  重启后 /health: ab.enabled=true, arms{A,B}, **mismatch=0**
+
+四、回退（一行）
+  删掉 /etc/systemd/system/paodekuai-ai.service.d/ab.conf（或把 1 改 0）
+  -> systemctl daemon-reload && systemctl restart paodekuai-ai
+  引擎与 ckpt 全程未动。
+
+五、启用范围
+  只设了 paodekuai-ai.service（主站 :8766）; 对外 API 实例(paodekuai-api)未设
+  ⇒ 外部 /v1/* 调用方不在实验内（variant 为 "-"）。
+
+六、备份
+  ~/paodekuai/_bak_20260923/（ai_bridge.py、app.js、两个 unit 的 dump、MD5SUMS）
