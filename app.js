@@ -735,6 +735,19 @@ function bridgeResyncQueued() {
   bridge._syncTask = bridgeEnqueue(() => bridgeResync());
   return bridge._syncTask;
 }
+/* 失步自愈信号：影子局与前端状态错位（桥回的着法与本地对不上）时，
+   先按本局动作历史把影子局重建到与前端一致（重建期间前端状态不变 ⇒ 重建后必然对得上），
+   再把错误标记 desync 交给 aiMove **重试本手** —— 而不是把可自愈的错位直接判死暂停
+   （2026-09-24 实测事故：人类出牌被桥拒 → 镜像失败重建排队在在途决策之后 →
+   桥用陈旧状态算出"过" → 本地硬校验不过 → 整局暂停；其实重建完就能继续）。
+   重建本身失败（服务/网络不可用）不吞掉：上层照旧按"不降级"暂停报错。 */
+async function bridgeDesyncSignal(reason) {
+  bridge.lastErr = 'desync: ' + reason;
+  try { await bridgeResyncQueued(); } catch (e) { /* 重建失败：交给上层判死 */ }
+  const err = new Error(bridge.lastErr);
+  err.desync = true;
+  return err;
+}
 function bridgeMirror(seat, myCards) {
   // 历史无条件记录（重放数据源）；/act 已在桥内落子的只记录不重发
   const wasActApplied = bridge.actPending;
@@ -979,15 +992,29 @@ async function aiMoveInner() {
       }
       if (bridge.ready) toast('AI 服务已恢复，继续对局', 1800);
     }
-    try {
-      const ret = await externalAI(ctx);
-      if (Array.isArray(ret) && ret.length === 0) {
-        applyPass(seat);                     // 模型明确过牌（externalAI 已确认本地无解）
-        return;
+    // 先等本手镜像落地（"先镜像、后决策"）：镜像失败时先重建影子局再决策，
+    // 避免用陈旧影子局算出一手与本地对不上的棋（那会走 bridgeDesyncSignal 自愈、白算一手）
+    if (bridge.lastMirror) {
+      const mirrored = await bridge.lastMirror.catch(() => false);
+      if (!mirrored && S.phase === 'playing' && S.turn === seat) await bridgeResyncQueued().catch(() => {});
+    }
+    // 失步自愈重试：desync 错误在抛出前已重建过影子局（前端状态未变 ⇒ 重建后必然对得上），
+    // 重试本手即可；重试仍失败才按"不降级"暂停报错（绝不退化成内置 AI 代打）。
+    for (let attempt = 0; attempt <= 2 && !cards; attempt++) {
+      if (S.phase !== 'playing' || S.turn !== seat) return;
+      try {
+        const ret = await externalAI(ctx);
+        if (Array.isArray(ret) && ret.length === 0) {
+          applyPass(seat);                     // 模型明确过牌（externalAI 已确认本地无解）
+          return;
+        }
+        if (Array.isArray(ret)) cards = ret;   // externalAI 已做精确映射 + validateSelection 校验
+      } catch (e) {
+        console.error('[PdkAI] 生产模型调用失败：', e);
+        if (!(e && e.desync) || attempt >= 2) break;
+        toast('AI 与本地状态失步：已重建影子局，正在重试本手…', 2200);
+        await new Promise(r => setTimeout(r, 300));
       }
-      if (Array.isArray(ret)) cards = ret;   // externalAI 已做精确映射 + validateSelection 校验
-    } catch (e) {
-      console.error('[PdkAI] 生产模型调用失败：', e);
     }
   }
   if (!cards) {
@@ -3175,12 +3202,12 @@ function init() {
       if (Array.isArray(r.cards) && r.cards.length === 0) {
         // 桥内判定"过"：仅当本地确认无解时才接受（有牌必打硬约束）
         if (ctx.last && ctx.legal.length === 0) return [];
-        throw new Error('bridge passed while local has legal moves');   // 失步信号
+        throw await bridgeDesyncSignal('bridge passed while local has legal moves');   // 失步：重建后重试
       }
       const cards = cardsFromBridge(r.cards, ctx.seat);
-      if (!cards) throw new Error('cards not in hand (desync)');
+      if (!cards) throw await bridgeDesyncSignal('cards not in hand');                  // 失步：重建后重试
       const v = validateSelection(ctx.seat, cards);
-      if (!v.ok) throw new Error('bridge move invalid locally: ' + v.err);
+      if (!v.ok) throw await bridgeDesyncSignal('bridge move invalid locally: ' + v.err);
       bridge.actPending = true;              // 桥内已落子：applyPlay 镜像时只记历史不重发
       return cards;
     } catch (e) {
