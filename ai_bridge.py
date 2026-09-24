@@ -293,7 +293,62 @@ def verify_assets() -> dict:
     return out
 
 
-def build_prod_agent(mode: str = "hybrid", extra=None, cfg=None):
+_RECIPE = {"ok": None, "ts": 0.0, "kw_n": 0, "checked": 0,
+           "rejected": [], "mismatched": [], "note": "",
+           "builds": 0, "failed": 0, "byWhere": {}}
+
+
+def recipe_info() -> dict:
+    """配方核对结果（供 /health 与自检）：按来源（session/selftest/probe）分别记录 + 失败累计。
+
+    "最后一次构建"会被健康探针等次要构建覆盖，故按来源分开记；`ok` 取全局口径：
+    只要有过**任何一次**构建被拒不/未落位（failed>0），或会话构建不 ok，即视为不健康。
+    """
+    out = dict(_RECIPE)
+    sess = (_RECIPE.get("byWhere") or {}).get("session") or {}
+    out["ok"] = (_RECIPE.get("failed", 0) == 0) and (sess.get("ok") is not False if sess else True)         and (_RECIPE.get("ok") is not False)
+    out["session"] = sess
+    out["sessionKwN"] = sess.get("kw_n")
+    return out
+
+
+def _kw_rejected_by(cls, kw) -> list:
+    """内核**不接受**的配方键（旧内核会 TypeError 静默丢参 —— 这里显式列出来）。"""
+    import inspect
+    try:
+        pr = inspect.signature(cls.__init__).parameters
+    except (TypeError, ValueError):
+        return []
+    if any(p.kind == p.VAR_KEYWORD for p in pr.values()):
+        return []                       # 有 **kwargs：无法静态判断，交给构建后核对
+    return [k for k in kw if k not in pr]
+
+
+def check_recipe_applied(agent, kw, rejected=None, where="other") -> dict:
+    """构建后逐项核对：配方键里能内省为同名属性的，值必须一致（防静默丢参/被覆盖）。"""
+    rejected = list(rejected or [])          # 本次构建的静态拒绝清单（不继承上次结果）
+    mismatched, checked = [], 0
+    for k, v in (kw or {}).items():
+        if not hasattr(agent, k):
+            continue                    # 不是同名属性（如 max_rows）——不参与核对
+        cur = getattr(agent, k)
+        if isinstance(v, (bool, int, float, str)) and isinstance(cur, (bool, int, float, str)):
+            checked += 1
+            if cur != v:
+                mismatched.append({"key": k, "want": v, "got": cur})
+    ok = (not rejected) and (not mismatched)
+    rec = {"ok": ok, "ts": time.time(), "kw_n": len(kw or {}), "checked": checked,
+           "rejected": rejected, "mismatched": mismatched, "where": where,
+           "note": ("配方全部落位" if ok else "配方未完全落位（详见 rejected/mismatched）")}
+    _RECIPE.update(rec)
+    _RECIPE["builds"] = int(_RECIPE.get("builds", 0)) + 1
+    if not ok:
+        _RECIPE["failed"] = int(_RECIPE.get("failed", 0)) + 1
+    _RECIPE.setdefault("byWhere", {})[where] = rec
+    return dict(rec)
+
+
+def build_prod_agent(mode: str = "hybrid", extra=None, cfg=None, where="other"):
     """按上游生产配方构建智能体（server.PROD_SOLVER_KW，与 server.build_ai 同源）。
 
     mode="hybrid"：上游生产配方（dual 引擎 + 残局穷举 + 数值计分；胜率优先、同胜率比净分）
@@ -313,21 +368,37 @@ def build_prod_agent(mode: str = "hybrid", extra=None, cfg=None):
     kw = prod_solver_kw()
     if extra:                                  # A/B 注入（本会话唯一差别）
         kw = {**kw, **extra}
+    want_wrt = None
     if mode == "dual":
-        kw.setdefault("win_rate_tol", 2.0)     # hmm: 见下方 setattr（旧内核无此参数）
-    try:
-        agent = SolverAgent(fb, _cfg, **kw)
-    except TypeError:
-        # 旧内核不认新参数：退回最小公共集（并保留引擎选择）
-        agent = SolverAgent(fb, _cfg, total_threshold=kw.get("total_threshold", 28),
-                            max_rows=kw.get("max_rows", 400000),
-                            engine=kw.get("engine", "c"))
-    if mode == "dual":
-        # 关掉"先按胜率筛"的容差带 → 候选池=全部，按期望净分选优
-        try:
-            agent.win_rate_tol = 2.0
-        except Exception:
-            pass
+        # win_rate_tol 是**属性型**开关（不是构造参数）：从构造 kw 里排除，构建后必须 setattr 成功
+        kw.pop("win_rate_tol", None)
+        want_wrt = 2.0
+    rejected = _kw_rejected_by(SolverAgent, kw)
+    if rejected:
+        # 不降级：内核不接受生产配方键时**拒绝服务**（旧行为是静默退回最小参数集 = 悄悄换打法）
+        _RECIPE.update({"ok": False, "ts": time.time(), "kw_n": len(kw),
+                        "rejected": sorted(rejected), "mismatched": [],
+                        "note": "内核不接受生产配方键 %s —— 拒绝服务（不降级）" % sorted(rejected)})
+        print(f"[bridge] ERROR 生产内核不接受配方键 {sorted(rejected)}：拒绝服务（不降级）",
+              file=sys.stderr, flush=True)
+        raise RuntimeError(f"生产内核不接受配方键 {sorted(rejected)}"
+                           "（旧内核会静默丢参 = 悄悄换打法）——按不降级策略拒绝服务")
+    agent = SolverAgent(fb, _cfg, **kw)
+    if want_wrt is not None:
+        # 关掉"先按胜率筛"的容差带 → 候选池=全部，按期望净分选优（必须成功，不许静默失败）
+        if not hasattr(agent, "win_rate_tol"):
+            _RECIPE.update({"ok": False, "ts": time.time(), "kw_n": len(kw), "checked": 0,
+                            "rejected": ["win_rate_tol"], "mismatched": [],
+                            "note": "dual 模式需要 win_rate_tol，内核没有该属性 —— 拒绝服务（不降级）"})
+            raise RuntimeError("dual 模式需要 agent.win_rate_tol，但内核没有该属性 —— 拒绝服务（不降级）")
+        agent.win_rate_tol = want_wrt
+    info = check_recipe_applied(agent, kw, rejected, where)
+    if not info["ok"]:
+        print(f"[bridge] ERROR 配方未完全落位 rejected={info['rejected']} "
+              f"mismatched={info['mismatched']} —— 拒绝服务（不降级）",
+              file=sys.stderr, flush=True)
+        raise RuntimeError(f"生产配方未完全落位（rejected={info['rejected']} "
+                           f"mismatched={info['mismatched']}）——按不降级策略拒绝服务")
     return agent, mode, net_info(fb)
 
 
@@ -663,7 +734,8 @@ class Shadow:
         self.cg = fast.CGame(counts_of_ids(h0), counts_of_ids(h1), leader, self.cfg)
         self.variant = ab_variant(self.no)               # A/B 分流（局号哈希, 确定性）
         self.agent, self.mode, self.net = build_prod_agent(
-            self.prod_mode, AB_ARM_B if self.variant == "B" else None, self.cfg)
+            self.prod_mode, AB_ARM_B if self.variant == "B" else None, self.cfg,
+            where="session")
         if self.variant == "B":
             # 防"无声 A/A": 旧内核对未知 kwarg 会 TypeError 回退并静默丢掉该键
             if getattr(self.agent, AB_SWITCH, None) is not True:
@@ -2068,7 +2140,7 @@ def component_probes() -> dict:
     except Exception as e:
         comp["fallback_net"] = {"ok": False, "err": repr(e)[:80]}
     try:
-        agent, mode, _ = build_prod_agent("hybrid")
+        agent, mode, _ = build_prod_agent("hybrid", where="probe")
         kw = prod_solver_kw()
         # 配方键全量显示：上游会随版本调整生产配方（如 e037b99 新增 opening_seeds/opening_margin），
         # 自检面板要能一眼看出"线上到底跑的是哪套配方"，所以不再白名单过滤。
@@ -2113,6 +2185,19 @@ def component_probes() -> dict:
     except Exception as e:
         comp["candgen"] = {"ok": False, "err": repr(e)[:80]}
     return comp
+
+
+def _recipe_case():
+    """金丝雀：按生产配方构建 agent 并逐项核对（配方键必须真的落位；A/B 臂开关必须生效）。"""
+    ag, mode, net = build_prod_agent("hybrid", AB_ARM_B if AB_TOP else None, where="selftest")
+    info = recipe_info()
+    if not info.get("ok"):
+        raise AssertionError(f"配方未落位 rejected={info.get('rejected')} "
+                             f"mismatched={info.get('mismatched')}")
+    if AB_TOP and getattr(ag, AB_SWITCH, None) is not True:
+        raise AssertionError(f"A/B 臂开关 {AB_SWITCH} 未生效（无声 A/A）")
+    return {"check": (f"配方 {info.get('kw_n')} 键 / 核对 {info.get('checked')} 项全部落位"
+                      + (f"；{AB_SWITCH}=True" if AB_TOP else ""))}
 
 
 def run_selftest() -> dict:
@@ -2258,6 +2343,7 @@ def run_selftest() -> dict:
     case("belief_fields", s_belief_fields)
     case("reasoning_chain", s_reasoning)
     case("candgen_gate", s_candgen)
+    case("recipe_applied", _recipe_case)
     return {"ok": all(x["ok"] for x in results), "cases": results,
             "hint": "任一 case 失败 => 对应链路异常；先看 /health 的 components，"
                     "再按 rid 查 data/api_log/<日期>.jsonl"}
@@ -2327,6 +2413,7 @@ class Handler(BaseHTTPRequestHandler):
                                             if not getattr(x.game, "finished", False)),
                         "pdkCommit": pdk_commit_info(),      # 生产 AI 仓库提交（模型版本号）
                         "productionConfig": prod_config_info(),
+                        "recipeCheck": recipe_info(),   # 生产配方是否逐项落在 agent 上
                         "ab": {"top": AB_TOP, "allB": AB_ALL_B, "switch": AB_SWITCH,
                                "cfgFromSession": CFG_FROM_SESSION, "stats": dict(AB_STAT)},
                         "netProbe": net_probe(),
