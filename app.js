@@ -600,6 +600,7 @@ async function runSelftest() {
     if (hd && hd.ab) {
       const ab = hd.ab;
       bits.push('<div class="st-line">部署：' +
+        (hd.deploy && hd.deploy.bridgeTimeText ? '<b>' + esc(hd.deploy.bridgeTimeText) + '</b> ｜ ' : '') +
         (ab.top ? ('顶牌纪律 <b>' + (ab.allB ? '100%' : '50% 灰度') + '</b>' +
                    (ab.stats ? `（B ${ab.stats.B} / A ${ab.stats.A}${ab.stats.mismatch ? ' / <span class="bad">未生效 ' + ab.stats.mismatch + '</span>' : ''}）` : ''))
                  : '顶牌纪律 关') +
@@ -2321,21 +2322,23 @@ async function refreshAIVersion() {
     const probe = r.netProbe || {};
     const commit = r.pdkCommit || {};
     const ab = r.ab || {};                     // A/B 与口径开关状态（桥 /health 新字段）
+    const dp = r.deploy || {};                 // 部署画像：桥部署时间 + 生效标记
     const isFallback = probe.net && probe.net.indexOf('final56') < 0;
     later(() => {
       el.classList.toggle('warn', !!isFallback);
-      el.innerHTML = 'AI 模型：<b>' + (r.productionModel || '未知') + '</b>' +
+      el.innerHTML = (dp.bridgeTimeText
+          ? '部署：<b>' + esc(dp.bridgeTimeText) + '</b> <span class="dim">（本机文件时间）</span>'
+            + ((dp.marks || []).length ? ' ｜ 生效：<b>' + esc((dp.marks || []).join(' / ')) + '</b>' : '') + ' ｜ '
+          : '') +
+        'AI 模型：<b>' + (r.productionModel || '未知') + '</b>' +
         (md5 ? ' <span class="ok">md5✓</span>' : ' <span class="bad">md5✗</span>') +
-        (commit.hash ? ' ｜ 版本：<b>' + esc(commit.hash) + '</b>' +
-          (commit.date ? ' <span class="dim">(' + esc(commit.date) + ')</span>' : '') : '') +
+        (commit.hash ? ' ｜ 引擎基线：<b>' + esc(commit.hash) + '</b>' +
+          (commit.date ? ' <span class="dim">(' + esc(commit.date) + (dp.engineDirty ? ' + 本机配方补丁' : '') + ')</span>' : '') : '') +
         ' ｜ 开局搜索：<b>' + (cfg.openingSearch ? '开' : '关') + '</b>' +
         (cfg.openingBudget != null ? '(≤' + cfg.openingBudget + 's)' : '') +
         ' ｜ 双模式：' + (r.modes || []).join('/') +
         ' ｜ 实际加载：<b>' + (probe.net || '未知') + '</b>' +
-        (isFallback ? ' <span class="bad">⚠ 已回退旧网络</span>' : ' <span class="ok">在线</span>') +
-        (cfg.midSolveChunk ? ' ｜ B2 分块 <b>' + cfg.midSolveChunk + '</b>' : '') +
-        (ab.top ? ' ｜ 顶牌纪律 <b>' + (ab.allB ? '100%' : '50%灰度') + '</b>' : '') +
-        (ab.cfgFromSession ? ' ｜ 当局规则 <b>✓</b>' : '');
+        (isFallback ? ' <span class="bad">⚠ 已回退旧网络</span>' : ' <span class="ok">在线</span>');
     });
   } catch {
     later(() => {

@@ -298,6 +298,39 @@ _RECIPE = {"ok": None, "ts": 0.0, "kw_n": 0, "checked": 0,
            "builds": 0, "failed": 0, "byWhere": {}}
 
 
+def deploy_info() -> dict:
+    """部署画像：桥文件**最后部署时间** + 生效的部署标记 + 引擎树提交（供 H5 首页判断"是不是最新"）。
+
+    为什么要它：引擎提交日期（如 b1948c7 2026-09-18）是**代码基线**，不代表本次部署时间——
+    本轮（2026-09-24）只改配方/纪律，日期看着"旧"容易误判，所以这里显式给出部署时间与生效标记。
+    """
+    import time as _t
+    info = {"bridgeTime": 0, "bridgeTimeText": "", "marks": [], "engineDirty": False}
+    try:
+        mt = Path(__file__).resolve().stat().st_mtime
+        info["bridgeTime"] = mt
+        info["bridgeTimeText"] = _t.strftime("%Y-%m-%d %H:%M", _t.localtime(mt))
+    except OSError:
+        pass
+    kw = prod_solver_kw()
+    msc = int(kw.get("mid_solve_chunk", 0) or 0)
+    if msc > 0:
+        info["marks"].append(f"B2分块{msc}")
+    if AB_TOP:
+        info["marks"].append("顶牌100%" if AB_ALL_B else "顶牌50%灰度")
+    if CFG_FROM_SESSION:
+        info["marks"].append("当局规则")
+    if kw.get("count_lock_rule") is False:
+        info["marks"].append("计数锁关")
+    try:
+        r = subprocess.run(["git", "-C", str(BOT_ROOT), "status", "--porcelain"],
+                           capture_output=True, text=True, timeout=8)
+        info["engineDirty"] = bool(r.stdout.strip())
+    except Exception:
+        pass
+    return info
+
+
 def recipe_info() -> dict:
     """配方核对结果（供 /health 与自检）：按来源（session/selftest/probe）分别记录 + 失败累计。
 
@@ -2413,6 +2446,7 @@ class Handler(BaseHTTPRequestHandler):
                                             if not getattr(x.game, "finished", False)),
                         "pdkCommit": pdk_commit_info(),      # 生产 AI 仓库提交（模型版本号）
                         "productionConfig": prod_config_info(),
+                        "deploy": deploy_info(),        # 部署画像：桥部署时间 + 生效标记（H5 首页显示）
                         "recipeCheck": recipe_info(),   # 生产配方是否逐项落在 agent 上
                         "ab": {"top": AB_TOP, "allB": AB_ALL_B, "switch": AB_SWITCH,
                                "cfgFromSession": CFG_FROM_SESSION, "stats": dict(AB_STAT)},
