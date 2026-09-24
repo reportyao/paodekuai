@@ -28,6 +28,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+import settle as _settle             # 人类规则结算（唯一实现处：底分/关门/炸弹由输家承担/红十）
+
 BOT_ROOT = Path(__file__).resolve().parent.parent / "pdk-ai-prod"
 if not BOT_ROOT.exists():
     BOT_ROOT = Path(__file__).resolve().parent.parent / "pdk_ai_work" / "pdk_ai"
@@ -208,17 +210,18 @@ class Room:
     def finish_round(self):
         g = self.game
         winner = int(g.winner)
-        loser = 1 - winner
-        rem = g.hand_count(loser)
-        shut = self.playsMade[loser] == 0
-        base = 0 if rem == 1 else rem
-        if shut:
-            base *= 2
-        scores = list(g.scores) if g.scores else [base, -base]
+        # 人类规则结算走 settle.py（与 16 张人机桥、15 张存档同一实现处）：
+        # 底分=输家剩牌、关门×2、炸弹分由输家承担、红十翻倍。
+        # 旧写法直接用内核 g.scores —— 内核口径是"炸弹持有者向被炸方收分（与胜负无关）"，
+        # 真人房会和人机出现两套口径（输家自己的炸弹把底分抵成 0），2026-09-24 用户拍板统一。
+        res = _settle.compute_result(self.initial, self.roundMoves, self.opts, winner)
+        scores = list(res["delta"])
+        rem, shut, base = res["rem"], res["shut"], res["base"]
         self.total[0] += scores[0]
         self.total[1] += scores[1]
         self.roundResult = {
             "winner": winner, "rem": rem, "shut": shut, "base": base,
+            "bombs": list(res["bombs"]), "redTxt": res["redTxt"],
             "delta": scores,
         }
         self.history.append({"round": self.roundNo, "winner": winner,

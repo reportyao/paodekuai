@@ -5,7 +5,7 @@ const $ = (id) => document.getElementById(id);
 const SUITS = ['♠', '♥', '♣', '♦'];            // 红: s===1 || s===3
 const RANK_NAME = { 3:'3',4:'4',5:'5',6:'6',7:'7',8:'8',9:'9',10:'10',11:'J',12:'Q',13:'K',14:'A',15:'2' };
 const BASE = 1;          // 底分：1分/张
-const BOMB_SCORE = 10;   // 每颗炸弹收取分数
+const BOMB_SCORE = 10;   // 每颗未被压掉的炸弹：输家多付 10 分给赢家（不论谁炸的）
 
 /* ================= 状态 ================= */
 const S = {
@@ -1467,7 +1467,7 @@ function applyPlay(seat, cards) {
       }
     }
     S.bombs.push({ by: seat, beaten: false });
-    msg = '💣 炸弹！结算时收 ' + BOMB_SCORE + ' 分';
+    msg = '💣 炸弹！结算时输家多付 ' + BOMB_SCORE + ' 分';
   }
   S.selected = new Set(); S.hints = []; S.hintIdx = -1;
   S.roundMoves.push({ seat, cards: cards.map(c => c.i), combo: { ...combo }, ts: Date.now() });
@@ -1956,7 +1956,9 @@ function settle(winner) {
   const surv = S.bombs.filter(b => !b.beaten);
   const bw = surv.filter(b => b.by === winner).length;
   const bl = surv.filter(b => b.by === loser).length;
-  let dW = base + BOMB_SCORE * (bw - bl);
+  // 炸弹分由输家承担：每颗未被压掉的炸弹，输家多付 BOMB_SCORE 给赢家（不论谁炸的）
+  // —— 2026-09-24 用户拍板；旧口径"炸弹持有者向被炸方收 10 分（与胜负无关）"已废
+  let dW = base + BOMB_SCORE * (bw + bl);
   let dL = -dW, redTxt = '';
   if (S.opts.red10 && S.red10Holder != null) {
     if (S.red10Holder === winner) { dW *= 2; dL = -dW; redTxt = S.names[winner] + '持有红桃十，翻倍'; }
@@ -2027,7 +2029,7 @@ function showRoundModal(r) {
   lines.push(`<div class="res-line"><span class="k">底分</span><span class="v">${S.names[r.loser]}剩 ${r.rem} 张 × ${BASE}分` +
     (r.rem === 1 ? '（仅剩1张，不计分）' : '') + (r.shut ? '，<b>关门！失分×2</b>' : '') + ` = <b class="num">${r.base}</b> 分</span></div>`);
   if (r.bw + r.bl > 0) {
-    lines.push(`<div class="res-line"><span class="k">炸弹</span><span class="v">${S.names[r.winner]} ${r.bw} 颗、${S.names[r.loser]} ${r.bl} 颗（每颗 ${BOMB_SCORE} 分，被压掉的不计）</span></div>`);
+    lines.push(`<div class="res-line"><span class="k">炸弹</span><span class="v">${S.names[r.winner]} ${r.bw} 颗、${S.names[r.loser]} ${r.bl} 颗（每颗 ${BOMB_SCORE} 分由输家付，被压掉的不计）</span></div>`);
   }
   if (r.redTxt) lines.push(`<div class="res-line"><span class="k">红桃十</span><span class="v">${r.redTxt}（输赢×2）</span></div>`);
   lines.push(`<div class="res-line hl"><span class="k">本局得分</span><span class="v">${S.names[w]} <b class="num pos">+${r.dW}</b> ｜ ${S.names[r.loser]} <b class="num neg">${r.dL}</b></span></div>`);

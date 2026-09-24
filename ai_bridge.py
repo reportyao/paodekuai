@@ -632,67 +632,22 @@ def allocate_no(prefix: str = "A") -> str:
         return no
 
 
-HEART_10 = 29                       # ♥10 的牌 id（rankIdx 7 × 4 + suit 1）；红十翻倍用
+# ---- 结算（人类规则）：唯一实现处在 settle.py（与网页服务/在线房共用）。
+# 本文件此前自带一份逐字节等价的拷贝，口径改动要改两处、极易漂移 —— 2026-09-24 收敛为直接调用。
+try:
+    from settle import compute_result as _settle_compute_result          # noqa: E402
+except ImportError:                                      # 非 repo 根目录启动时兜底
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from settle import compute_result as _settle_compute_result          # noqa: E402
 
 
 def compute_result(hands, moves, opts, winner) -> dict:
-    """按网页版计分规则结算（与 app.js settle() 逐条对齐）。
+    """人类规则结算 → 转调 settle.compute_result（底分/关门/炸弹由输家承担/红十翻倍）。
 
-    底分 = 输家剩余张数（剩 1 张不计分）；关门（输家一手未出）失分 ×2；
-    未被压掉的炸弹每颗 ±10（后手用更大炸弹直接压掉才不算，隔了过牌重新领出不算压）；
-    红桃十翻倍（opts.red10，持有者所在一方输赢 ×2）。
-
-    为什么在桥里算：内核 Game.scores 对这套人类规则从不计分（恒 [0,0]），而网页版只把
-    结果存本地。棋谱是对局记录/复盘的权威数据，必须自带可展示的结算结果。
-    返回 dict（写进棋谱 result 字段；scores 取 delta）。任何异常由调用方兜底，不影响落盘。
+    为什么桥要算：内核 Game.scores 用的是引擎口径（炸弹持有者向被炸方收分、与胜负无关），
+    与网页版规则不同；棋谱是对局记录/复盘的权威数据，必须自带网页口径的结算结果。
     """
-    loser = 1 - int(winner)
-    played = [0, 0]
-    bombs = []                                   # [{by, beaten}]
-    prev_live = None                             # 上一手非过牌且中间无过牌（= 可被直接压）
-    for m in moves or []:
-        if not isinstance(m, dict) or m.get("pass") or not (m.get("cards")):
-            prev_live = None
-            continue
-        seat = int(m.get("seat") or 0)
-        played[seat] += len(m["cards"])
-        combo = m.get("combo") or {}
-        is_bomb = (combo.get("ptype") == 8)
-        if is_bomb and prev_live is not None and (prev_live.get("combo") or {}).get("ptype") == 8:
-            for b in reversed(bombs):            # 更大炸弹直接压掉上家炸弹：被压的不计分
-                if not b["beaten"]:
-                    b["beaten"] = True
-                    break
-        if is_bomb:
-            bombs.append({"by": seat, "beaten": False})
-        prev_live = m
-    rem = max(0, len(hands[loser] or []) - played[loser])
-    shut = played[loser] == 0
-    base = 0 if rem == 1 else rem
-    if shut:
-        base *= 2
-    surv = [b for b in bombs if not b["beaten"]]
-    bw = sum(1 for b in surv if b["by"] == int(winner))
-    bl = len(surv) - bw
-    dW = base + 10 * (bw - bl)
-    dL = -dW
-    red_txt = ""
-    if opts.get("red10"):
-        holder = next((seat for seat in (0, 1) if HEART_10 in (hands[seat] or [])), None)
-        if holder is not None:
-            who = "你" if holder == 0 else "AI"
-            if holder == int(winner):
-                dW *= 2
-                dL = -dW
-            else:
-                dL *= 2
-                dW = -dL
-            red_txt = f"{who} 持有红桃十，翻倍"
-    delta = [0, 0]
-    delta[int(winner)] = dW
-    delta[loser] = dL
-    return {"winner": int(winner), "loser": loser, "rem": rem, "shut": bool(shut),
-            "base": base, "bombs": [bw, bl], "redTxt": red_txt, "delta": delta}
+    return _settle_compute_result(hands, moves, opts, winner)
 
 
 def write_replay(s: Shadow, live: bool):

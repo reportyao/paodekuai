@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """对局结算（人类规则）—— 纯 Python，无第三方依赖，可被桥与网页服务共用。
+**唯一实现处**：ai_bridge.compute_result / replay_report.save_game15 / online_server 都调它，
+网页版 app.js settle() 与之逐条对齐（改口径必须两边一起改）。
 
 规则（与 app.js settle() 逐条对齐）：
 - 底分 = 输家剩余张数（剩 1 张不计分）；
 - 关门（输家一手未出）失分 ×2；
-- 未被压掉的炸弹每颗 ±10（后手用更大炸弹**直接**压掉才不算，隔了过牌重新领出不算压）；
+- **炸弹分由输家承担**：每颗未被压掉的炸弹，输家多付 BOMB_SCORE 分给赢家（不论谁炸的；
+  后手用更大炸弹**直接**压掉才不算，隔了过牌重新领出不算压）。
+  —— 2026-09-24 用户拍板：旧口径"炸弹持有者向被炸方收 10 分（与胜负无关）"会让输家
+  自己的炸弹把底分抵成 0（A1737：AI 胜、人类剩 10 张、人类有一颗未压炸弹 → 0 分），已废。
+  只影响新局；历史棋谱保留当时算出的分数（用户决定不回填）。
 - 红桃十翻倍（opts.red10：♥10 持有者所在一方输赢 ×2，随后锁定）；
 - 选项开关按传入 opts 解释（sanzhang/four3 不影响计分）。
 """
 
 HEART_10 = 29                       # ♥10 的牌 id（rankIdx 7 × 4 + suit 1）
+BOMB_SCORE = 10                     # 每颗未被压掉的炸弹的分数（由输家付给赢家）
 
 
 def compute_result(hands, moves, opts, winner) -> dict:
@@ -49,7 +56,8 @@ def compute_result(hands, moves, opts, winner) -> dict:
     surv = [b for b in bombs if not b["beaten"]]
     bw = sum(1 for b in surv if b["by"] == winner)
     bl = len(surv) - bw
-    dW = base + 10 * (bw - bl)
+    # 每颗未被压掉的炸弹：输家多付给赢家（与"谁炸的"无关）
+    dW = base + BOMB_SCORE * (bw + bl)
     dL = -dW
     red_txt = ""
     if opts.get("red10"):
