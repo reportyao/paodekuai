@@ -193,7 +193,11 @@ def net_info(fb) -> str:
 ASSET_MD5 = {
     "ckpt/policy_a2c_final56.pt": "534dcca82ee60760a1a40c546a83e5f1",
     "ckpt/qnet.pt": "4be2824a0f47c98be6fa8c80276d0777",
-    "c/pdk_core.c": "aefb96685e0dc8a164c60bc00388919a",
+    "ckpt/expert_model.pt": "67b005cd21b0f088e29eb4a3e6bad0b5",   # 批次112: 新树实际加载的模型
+    "ckpt/human_model.pt": "d49eb46993e4fac8269b06bef07c765c",   # 批次112: 新树实际加载的模型
+    "ckpt/opening_value.pt": "c5563d0f718214d88ba76c288defcff5",   # 批次112: 新树实际加载的模型
+    "ckpt/valuenet.pt": "7aa0c3583e33fa54674bc69340864c96",   # 批次112: 新树实际加载的模型
+    "c/pdk_core.c": "d5bfb6417734c97034536a58acef7aea",   # 批次112 换新树(同步换 C 求解器); 旧值 aefb9668…
 }
 if os.name == "nt":
     ASSET_MD5["c/pdk_core.dll"] = "f49c46e86313075df918caad4fa2f085"
@@ -260,6 +264,12 @@ def prod_config_info() -> dict:
             "midSolveChunk": int(kw.get("mid_solve_chunk", 0)),    # 批次111/B2: 0=整批(旧), >0=分块
             "countLockRule": bool(kw.get("count_lock_rule", False)),
             "topGuardOpp": int(kw.get("top_guard_opp", 0)),
+            # 批次112 生效纪律：一律从**实际配方**取，不从 AB_* env 推断
+            # （灰度撤掉后 AB_TOP=0，按 env 判会把已生效的纪律报成"关"）
+            "singleTopRule": bool(kw.get("single_top_rule", False)),
+            "openingBombGuard": bool(kw.get("opening_bomb_guard", False)),
+            "midScoreBand": float(kw.get("mid_score_band", 0.0) or 0.0),
+            "structCostW": float(kw.get("struct_cost_w", 0.0) or 0.0),
             "overrides": "PROD_SOLVER_KW（上游生产配方）",
             "commit": pdk_commit_info().get("hash", ""),
         }
@@ -316,8 +326,26 @@ def deploy_info() -> dict:
     msc = int(kw.get("mid_solve_chunk", 0) or 0)
     if msc > 0:
         info["marks"].append(f"B2分块{msc}")
+    # 生效标记取**实际配方**，不取 AB_* env：2026-09-24 起纪律直接落在 PROD_SOLVER_KW，
+    # 灰度开关（AB_TOP）撤掉后恒 0 —— 按它判会把已生效的顶牌纪律漏报成"没开"。
+    if kw.get("single_top_rule"):
+        info["marks"].append("顶牌纪律")
+    if kw.get("opening_bomb_guard"):
+        info["marks"].append("开局炸弹纪律")
+    try:
+        _msb = float(kw.get("mid_score_band", 0) or 0)
+    except (TypeError, ValueError):
+        _msb = 0.0
+    if _msb > 1e-9:
+        info["marks"].append(f"中盘带宽{_msb:g}")
+    try:
+        _scw = float(kw.get("struct_cost_w", 0) or 0)
+    except (TypeError, ValueError):
+        _scw = 0.0
+    if _scw > 0:
+        info["marks"].append(f"结构代价{_scw:g}")
     if AB_TOP:
-        info["marks"].append("顶牌100%" if AB_ALL_B else "顶牌50%灰度")
+        info["marks"].append("A/B分流100%B" if AB_ALL_B else "A/B分流50%")
     if CFG_FROM_SESSION:
         info["marks"].append("当局规则")
     if kw.get("count_lock_rule") is False:

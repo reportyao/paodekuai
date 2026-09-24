@@ -598,14 +598,20 @@ async function runSelftest() {
       (v.rows ? `(${v.rows} 类)` : v.kept != null ? `(${v.kept}/${v.of})` : ''));
     bits.push(`<div class="st-line">组件：${compBits.join('　') || '<span class="dim">不可用</span>'}</div>`);
     if (hd && hd.ab) {
-      const ab = hd.ab;
+      const ab = hd.ab, cfg0 = hd.productionConfig || {};
+      // 纪律按**实际配方**显示（productionConfig.*）；ab.top 只是 A/B 分流开关：
+      // 灰度撤掉后 ab.top=false 并不代表纪律没开（2026-09-24 新树起纪律直接落进配方）。
+      const topOn = cfg0.singleTopRule;
       bits.push('<div class="st-line">部署：' +
         (hd.deploy && hd.deploy.bridgeTimeText ? '<b>' + esc(hd.deploy.bridgeTimeText) + '</b> ｜ ' : '') +
-        (ab.top ? ('顶牌纪律 <b>' + (ab.allB ? '100%' : '50% 灰度') + '</b>' +
+        (topOn ? '顶牌纪律 <b>开</b>' + (ab.top ? (ab.allB ? '（A/B 100%）' : '（A/B 50% 灰度）') : '')
+               : (ab.top ? ('顶牌纪律 <b>' + (ab.allB ? '100%' : '50% 灰度') + '</b>' +
                    (ab.stats ? `（B ${ab.stats.B} / A ${ab.stats.A}${ab.stats.mismatch ? ' / <span class="bad">未生效 ' + ab.stats.mismatch + '</span>' : ''}）` : ''))
-                 : '顶牌纪律 关') +
-        (hd.productionConfig && hd.productionConfig.midSolveChunk
-          ? ' ｜ B2 分块 <b>' + hd.productionConfig.midSolveChunk + '</b>' : '') +
+                 : '顶牌纪律 关')) +
+        (cfg0.openingBombGuard ? ' ｜ 开局炸弹纪律 <b>✓</b>' : '') +
+        (cfg0.midScoreBand > 1e-9 ? ' ｜ 中盘带宽 <b>' + cfg0.midScoreBand + '</b>' : '') +
+        (cfg0.structCostW > 0 ? ' ｜ 结构代价 <b>' + cfg0.structCostW + '</b>' : '') +
+        (cfg0.midSolveChunk ? ' ｜ B2 分块 <b>' + cfg0.midSolveChunk + '</b>' : '') +
         (ab.cfgFromSession ? ' ｜ 当局规则 <b>✓</b>' : '') + '</div>');
     }
     if (hd && hd.pdkCommit && hd.pdkCommit.hash)
