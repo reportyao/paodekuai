@@ -224,9 +224,11 @@ def load_summaries(refresh: bool = True, deck: int | None = None) -> list[dict]:
             _IDS_DONE = True
         rows = _INDEX["rows"]
         seen = set()
+        scanned = set()               # 本次实际扫描的编号前缀（15/16 张分区后必须区分）
         for d, prefix in DIRS:
             if deck is not None and int(DECK_OF_PREFIX.get(prefix, 16)) != int(deck):
                 continue
+            scanned.add(prefix)
             if not d.exists():
                 continue
             for p in d.glob("*.json"):
@@ -244,7 +246,10 @@ def load_summaries(refresh: bool = True, deck: int | None = None) -> list[dict]:
                 except Exception:
                     continue
                 rows[key] = _summary_of(dd, p, prefix, st)
-        for k in [k for k in rows if k not in seen]:
+        # 只清理"本次扫描范围内"已消失的文件：带 deck 筛选的请求只扫一档，
+        # 若按 seen 全量剪枝会把另一档的行也删掉（索引随后可由全量请求重建，
+        # 但要白解析 7MB 牌谱 —— 列表会周期性变慢，且排查时容易误判"记录丢了"）。
+        for k in [k for k in rows if k.split(":", 1)[0] in scanned and k not in seen]:
             rows.pop(k, None)
         if refresh:
             _save_index(rows)
