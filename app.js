@@ -27,6 +27,7 @@ const S = {
   currentSid: null,                            // 本局服务端会话/存档号（15张局上传后写入）
   bridgeMode: false, roundLeader: 0,           // AI 机器人桥接状态 / 本局先手
   ai15Ready: false, ai15Checked: false, ai15Mode: '',   // 15张：pdk45 服务健康/是否已探测/本局模式（牌桌标签）
+  aiPending: false,                             // AI 决策在途（防看门狗把长决策误判为卡死而重复派发）
   aiBlocked: false, aiErrorMsg: '',             // 不降级：AI 异常时暂停本局
   revealOpp: false,                            // 测试：实时明牌对手手牌
   replay: null, replayArchive: [],
@@ -596,6 +597,16 @@ async function runSelftest() {
       `${v.ok ? '✅' : '❌'} ${SELFTEST_COMP_CN[k] || k}` +
       (v.rows ? `(${v.rows} 类)` : v.kept != null ? `(${v.kept}/${v.of})` : ''));
     bits.push(`<div class="st-line">组件：${compBits.join('　') || '<span class="dim">不可用</span>'}</div>`);
+    if (hd && hd.ab) {
+      const ab = hd.ab;
+      bits.push('<div class="st-line">部署：' +
+        (ab.top ? ('顶牌纪律 <b>' + (ab.allB ? '100%' : '50% 灰度') + '</b>' +
+                   (ab.stats ? `（B ${ab.stats.B} / A ${ab.stats.A}${ab.stats.mismatch ? ' / <span class="bad">未生效 ' + ab.stats.mismatch + '</span>' : ''}）` : ''))
+                 : '顶牌纪律 关') +
+        (hd.productionConfig && hd.productionConfig.midSolveChunk
+          ? ' ｜ B2 分块 <b>' + hd.productionConfig.midSolveChunk + '</b>' : '') +
+        (ab.cfgFromSession ? ' ｜ 当局规则 <b>✓</b>' : '') + '</div>');
+    }
     if (hd && hd.pdkCommit && hd.pdkCommit.hash)
       bits.push(`<div class="st-line dim">内核版本 ${esc(hd.pdkCommit.hash)} ｜ 引擎 ${((hd.productionConfig || {}).engine || '?')} ｜ 残局穷举 ≤${((hd.productionConfig || {}).exactWorldsTotal) || 0} 张</div>`);
     if (st && st.cases) {
@@ -900,6 +911,16 @@ async function ai15Decide(seat) {
 
 async function aiMove() {
   if (S.phase !== 'playing' || S.turn !== 1 || S.mode !== 'ai') return;
+  if (S.aiPending) return;                     // 已在决策中：直接返回（防重复派发/重复落子）
+  S.aiPending = true;
+  try {
+    await aiMoveInner();
+  } finally {
+    S.aiPending = false;
+  }
+}
+
+async function aiMoveInner() {
   const seat = 1;
   const hand = S.hands[seat];
   const ctx = {
@@ -2299,6 +2320,7 @@ async function refreshAIVersion() {
     const cfg = r.productionConfig || {};
     const probe = r.netProbe || {};
     const commit = r.pdkCommit || {};
+    const ab = r.ab || {};                     // A/B 与口径开关状态（桥 /health 新字段）
     const isFallback = probe.net && probe.net.indexOf('final56') < 0;
     later(() => {
       el.classList.toggle('warn', !!isFallback);
@@ -2310,7 +2332,10 @@ async function refreshAIVersion() {
         (cfg.openingBudget != null ? '(≤' + cfg.openingBudget + 's)' : '') +
         ' ｜ 双模式：' + (r.modes || []).join('/') +
         ' ｜ 实际加载：<b>' + (probe.net || '未知') + '</b>' +
-        (isFallback ? ' <span class="bad">⚠ 已回退旧网络</span>' : ' <span class="ok">在线</span>');
+        (isFallback ? ' <span class="bad">⚠ 已回退旧网络</span>' : ' <span class="ok">在线</span>') +
+        (cfg.midSolveChunk ? ' ｜ B2 分块 <b>' + cfg.midSolveChunk + '</b>' : '') +
+        (ab.top ? ' ｜ 顶牌纪律 <b>' + (ab.allB ? '100%' : '50%灰度') + '</b>' : '') +
+        (ab.cfgFromSession ? ' ｜ 当局规则 <b>✓</b>' : '');
     });
   } catch {
     later(() => {
@@ -2555,7 +2580,8 @@ function aiWatchdogStart() {
   if (AI_WD.timer) return;
   AI_WD.timer = setInterval(() => {
     const stuck = S.phase === 'playing' && S.mode === 'ai' && S.turn === 1
-      && S.aiTimer == null && !S.aiBlocked && !bridge.initing && !bridge.syncing;
+      && S.aiTimer == null && !S.aiBlocked && !bridge.initing && !bridge.syncing
+      && !S.aiPending && !bridge.actPending;   // 决策在途（B2 后最长可达 ~9s）不算卡死
     if (!stuck) { AI_WD.rescued = 0; return; }
     AI_WD.rescued++;
     if (AI_WD.rescued <= 3) {
