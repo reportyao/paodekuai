@@ -515,7 +515,23 @@ print("终局：赢家", g["winner"], "比分", g["scores"])
 
 - 路径版本：`/v1/*`；破坏性变更会升级为 `/v2/*`，`v1` 至少保留 3 个月。
 - 响应**只增字段不删字段**；请忽略未知字段。
+- 服务端会做**灰度（A/B）**验证内核开关：按**局号确定性分流**（同一局固定落在同一策略组，可配对分析）。会话接口与棋谱里会出现 `variant` 字段（`A`=现行为 / `B`=灰度新策略 / `-`=非实验局）；**本对外 `/v1/*` 实例不参与实验**（该字段为 `"-"`）。调用方忽略它即可 —— 响应只增字段，不影响既有解析。
 - 服务端内核版本（模型/求解器）由服务方滚动更新，**决策行为可能随版本变化**（这是"用最新最强模型"的代价）。`/v1/health` 会给出模型标识与配置摘要；如需冻结版本，可申请专属实例。
+
+**现网生效范围（2026-09-23）**
+
+| 能力 | 现网状态 | 备注 |
+|---|---|---|
+| 会话 A/B 灰度（`variant`、`/health.ab`） | ✅ 已生效（主站会话实例 :8766） | 按局号 md5 分流；`Environment=PDK_AB_TOP=1` |
+| 棋谱 `variant` / `ab_switch` 字段 | ✅ 已生效 | 16 张棋谱由**桥**落盘（`data/replays/*.json`） |
+| `trick` **语义校验**（非法四元组 → HTTP 400 并给出正确写法） | ⏳ **尚未生效** | 代码已在仓库（`53ef38e`），但线上引擎缺 `pdk/trickguard.py` ⇒ **桥与引擎必须同批部署**；在此之前，错 `len` 仍会静默退化 |
+| `PDK_CFG_FROM_SESSION`（agent 与当局同规则） | ⏳ 尚未生效 | 桥仓 `ba72992`，同上（同批） |
+
+> 排障提示：`GET /health` 的 `ab` 块里 `mismatch` 是"**开关没真正生效**"的计数
+> （旧内核不认该 kwarg 时会静默丢弃 ⇒ 两臂变成同一个）。它与 `A`/`B` 计数一起看，
+> `mismatch > 0` 说明本组灰度不可信。
+
+
 
 ---
 
@@ -565,6 +581,8 @@ print(d["move"], d["pass"], d.get("explain", {}).get("reason"))
 | `/v1/explain` | `POST /api/explain`（会话版：`POST /api/explain {sid, ply}`） |
 | `/v1/analyze` | `POST /api/analyze`（会话版：`POST /api/analyze {sid, ply}`） |
 | `/v1/decode` | `POST /api/decode` |
+| `POST /init`（会话开局，仅内网） | 响应含 `variant`（A/B 策略组）、`no`（局号）、`sid`、`file` |
+| `GET /health` | 含 `ab` 块：`enabled`/`switch`/`arms`（各臂计数）/`mismatch` |
 | `/v1/legal`（申请开启） | `GET /legal?sid=`（会话） |
 | `/v1/new_game` `| /play` `| /state`（申请开启） | 由 AI 仓库原生 `server.py` 提供 |
 
