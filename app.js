@@ -519,14 +519,24 @@ async function bridgeApi(path, body, timeoutMs = 15000) {
     return j;
   } catch (e) {
     bridge.lastRid = (e && e.rid) || rid;           // 失败也保留，便于报障
+    // ⚠ 不要改写 e.message：fetch 超时产生的是 DOMException(AbortError)，其 message 是
+    //   只读 getter —— strict mode 下赋值会抛 "Cannot set property message of which has
+    //   only a getter"（2026-09-24 线上事故：手机断网→请求被掐→这句二次异常把真实的
+    //   超时/断网原因盖住）。改为**新建 Error**并搬运标志位，下游 retryable 判断不受影响。
+    let out = e;
     if (e && e.name === 'AbortError') {
-      e.transport = true; e.timedOut = true;
-      e.message = 'AI 正在算牌（超过 ' + Math.round(timeoutMs / 1000) + 's 未回），稍后再点一次';
+      out = new Error('AI 正在算牌（超过 ' + Math.round(timeoutMs / 1000) + 's 未回），稍后再点一次');
+      out.timedOut = true; out.transport = true;
     } else if (e instanceof TypeError) {
-      e.transport = true;                           // fetch 网络层错误
-      e.message = 'AI 服务连不上（网络中断或被重置），请重试';
+      out = new Error('AI 服务连不上（网络中断或被重置），请重试');
+      out.transport = true;
     }
-    throw e;
+    if (out !== e) {
+      if (e && e.rid) out.rid = e.rid;
+      if (e && e.status != null) out.status = e.status;
+      out.cause = e;                                // 原始错误挂在 cause，便于排查
+    }
+    throw out;
   } finally { clearTimeout(tm); }
 }
 
