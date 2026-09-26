@@ -3208,8 +3208,16 @@ function init() {
     if (!bridge.ready) return null;
     try {
       const r = await bridgeEnqueue(() => bridgeApi('/act', { sid: bridge.sid }, 30000));   // 排队；超时放宽（CPU 被抢占时更宽容）
-      if (!r || r.fallback) throw new Error(r && r.error || 'fallback');
-      if (Array.isArray(r.cards) && r.cards.length === 0) {
+      if (!r) throw new Error('AI 服务空响应');
+      // /act 异常响应契约：一律先走"失步自愈"（重建影子局 + 重试本手，≤2 次），仍失败才暂停。
+      // bridgeDesyncSignal 会把桥的真实错误文本（500 响应体里的 error，含 traceback 摘要）留在
+      // lastErr 供诊断弹窗展示——不再让缺字段把流程崩成 "undefined is not an object (evaluating 'ids')"
+      // （A2134 事故，2026-09-26：桥侧模型路径 500 → r.cards 为 undefined → cardsFromBridge 裸崩）。
+      if (r.error) throw await bridgeDesyncSignal('act: ' + r.error);
+      if (r.fallback) throw new Error(r.error || 'fallback');
+      if (r.finished) throw await bridgeDesyncSignal('桥内牌局已结束而本地仍在打（状态错位）');
+      if (!Array.isArray(r.cards)) throw await bridgeDesyncSignal('act 响应缺少 cards 字段');
+      if (r.cards.length === 0) {
         // 桥内判定"过"：仅当本地确认无解时才接受（有牌必打硬约束）
         if (ctx.last && ctx.legal.length === 0) return [];
         throw await bridgeDesyncSignal('bridge passed while local has legal moves');   // 失步：重建后重试

@@ -175,6 +175,16 @@ def prod_solver_kw() -> dict:
     ecap = _env_int("PDK_EXACT_WORLDS_CAP")
     if ecap:
         kw["exact_worlds_cap"] = ecap
+    # 模型路径净化：上游配方出现过相对路径（server.py "ckpt/human_model.pt"，批次127 轮次的
+    # 回归——训练机 cwd=树根时能工作）。本桥 systemd WorkingDirectory=/home/ubuntu/paodekuai，
+    # 相对路径 torch.load 直接 FileNotFoundError，/act 首手 500（A2134 事故，2026-09-26；
+    # "间歇性"是因为懒加载只在开局搜索的 rollout 分支触发）。这里把非绝对的 .pt/.pth
+    # 路径统一解析到 BOT_ROOT 下（幂等：转过一次即绝对，不再进本分支）。
+    for _k, _v in list(kw.items()):
+        if isinstance(_v, str) and _v.lower().endswith((".pt", ".pth")) and not os.path.isabs(_v):
+            _cand = BOT_ROOT / _v
+            if _cand.exists():
+                kw[_k] = str(_cand)
     return kw
 
 
