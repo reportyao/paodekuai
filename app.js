@@ -3215,7 +3215,13 @@ function init() {
       // （A2134 事故，2026-09-26：桥侧模型路径 500 → r.cards 为 undefined → cardsFromBridge 裸崩）。
       if (r.error) throw await bridgeDesyncSignal('act: ' + r.error);
       if (r.fallback) throw new Error(r.error || 'fallback');
-      if (r.finished) throw await bridgeDesyncSignal('桥内牌局已结束而本地仍在打（状态错位）');
+      // ⚠ 正常的收官响应是 {cards:[最后一张], finished:true}（do_act 单一出口）——
+      //   必须照常走下面的应用分支（applyPlay 手牌清空即触发 endRound 结算）。
+      //   只有 finished 且**没有可应用的手牌**（do_act 早退分支 {"finished":true}）才是
+      //   真状态错位：桥内已完结而本地还在打（典型=上一次 /act 响应整体丢失）。
+      //   A2136 事故（09-27 晨）：曾把收官响应误判成错位，AI 的制胜一手被扔掉。
+      if (r.finished && !(Array.isArray(r.cards) && r.cards.length > 0))
+        throw await bridgeDesyncSignal('桥内牌局已结束而本地仍在打（状态错位）');
       if (!Array.isArray(r.cards)) throw await bridgeDesyncSignal('act 响应缺少 cards 字段');
       if (r.cards.length === 0) {
         // 桥内判定"过"：仅当本地确认无解时才接受（有牌必打硬约束）
