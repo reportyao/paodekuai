@@ -171,7 +171,7 @@ _IDS_DONE = False
 # 摘要里要保留的字段：够列表/统计用（不含逐手 moves，那才是慢的根源）
 _SUMMARY_KEYS = ("no", "live", "aborted", "winner", "api", "caller", "source", "names",
                  "scores", "durationSec", "result", "timeText", "ts", "humanSeat",
-                 "leader", "opts")
+                 "leader", "opts", "player_id")   # A3: 玩家身份进索引摘要
 
 
 def _summary_of(d: dict, path, prefix: str, st) -> dict:
@@ -313,12 +313,14 @@ def save_game15(payload: dict) -> dict:
     if not (no.startswith("B") and no[1:].isdigit()):
         no = allocate_no("B")
     sid = str(payload.get("sid") or uuid_hex())[:16]
+    pid = str(payload.get("player_id") or "").strip()[:32]   # A3: 15张同样采集
     DECK15_DIR.mkdir(parents=True, exist_ok=True)
     doc = {
         "no": no, "deck": 15, "version": 2, "source": "h5_15",
         "sid": sid, "timeText": payload.get("timeText") or _now_text(),
         "ts": payload.get("ts") or _now_iso(),
         "names": payload.get("names") or ["human", "ai"],
+        **({"player_id": pid} if pid else {}),   # A3: 有才写
         "mode": payload.get("mode") or "hybrid", "net": payload.get("net") or "",
         "playMode": payload.get("playMode") or "ai",       # ai=人机 / hotseat=热座
         "humanSeat": 0,

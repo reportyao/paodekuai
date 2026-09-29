@@ -526,6 +526,13 @@ def check_ident(v, what: str = "sid") -> str:
     return s
 
 
+def _soft_ident(v) -> str:
+    """player_id 等可选标识（A3 玩家身份采集, 2026-09-29）：
+    合法则保留、非法/缺失返回空串——可选字段绝不影响开局主流程。"""
+    s = str(v or "").strip()
+    return s if (4 <= len(s) <= 64 and _ID_RE.fullmatch(s)) else ""
+
+
 def check_file(v) -> str:
     """对局文件名校验：禁止 .. 与路径分隔符（该值来自请求，属路径穿越风险点）。"""
     s = str(v or "")
@@ -692,6 +699,8 @@ def write_replay(s: Shadow, live: bool):
     }
     if res:
         payload["result"] = res
+    if getattr(s, "player_id", ""):                   # A3: 匿名玩家指纹随对局落盘
+        payload["player_id"] = s.player_id
     if getattr(s, "caller", ""):                      # 外部调用方的对局：标注归属与耗时
         payload["caller"] = s.caller
         payload["api"] = True
@@ -737,10 +746,12 @@ class Shadow:
     """一局的镜像状态 + AI 内核。"""
 
     def __init__(self, hands, kitty, leader, opts, prod_mode="hybrid",
-                 sid: str = "", reuse_no=None, reuse_file=None):
+                 sid: str = "", reuse_no=None, reuse_file=None,
+                 player_id: str = ""):
         self.created = time.time()
         self.last_used = self.created                     # 空闲回收依据
         self.caller = ""                                  # 对外调用方名（来自网关 X-PDK-Caller）
+        self.player_id = _soft_ident(player_id)           # 匿名玩家指纹（A3: 随 replay 落盘）
         self.ended_ts = None                              # 终局时间（统计用时用）
         self.sid = check_ident(sid or uuid.uuid4().hex[:12], "sid")
         self.no = check_no(reuse_no) if reuse_no else allocate_no(REPLAY_PREFIX)  # 开局即定编号
@@ -907,7 +918,8 @@ def handle_init(p: dict):
     cleanup_stale_live()
     sid = check_ident(p.get("sid"), "sid") if p.get("sid") else uuid.uuid4().hex[:12]
     s = Shadow([h0, h1], kitty, leader, opts, prod_mode, sid=sid,
-               reuse_no=p.get("no"), reuse_file=p.get("file"))
+               reuse_no=p.get("no"), reuse_file=p.get("file"),
+               player_id=p.get("player_id"))               # A3: 匿名玩家指纹
     with LOCK:
         SESSIONS[sid] = s
     evict_old()
@@ -1998,7 +2010,8 @@ def do_new_game(p: dict):
         raise ApiError(f"未知 mode {mode!r}（可选 hybrid|dual）")
     h0, h1, kitty, leader = _deal_new_game()
     gid = uuid.uuid4().hex[:24]                      # 96 位随机，防枚举
-    s = Shadow([h0, h1], kitty, leader, opts, prod_mode=mode, sid=gid)
+    s = Shadow([h0, h1], kitty, leader, opts, prod_mode=mode, sid=gid,
+               player_id=p.get("player_id"))          # A3: 匿名玩家指纹（外部 API 同样收）
     s.caller = str(p.get("_caller") or "")[:40]      # 由网关注入（服务端字段，客户端伪造无效）
     with LOCK:
         SESSIONS[gid] = s
@@ -2654,7 +2667,8 @@ def _restore_sessions_inner() -> int:
         try:
             s = Shadow(d["hands"], d.get("kitty", []), d.get("leader", 0),
                        d.get("opts", {}), d.get("mode", "hybrid"), sid=sid,
-                       reuse_no=d.get("no"), reuse_file=f.name)
+                       reuse_no=d.get("no"), reuse_file=f.name,
+                       player_id=d.get("player_id"))    # 复审1: 恢复路径不丢指纹
             s.restoring = True                       # 重放期间不写盘
             try:
                 for code in d.get("codes", []):

@@ -5,6 +5,18 @@
 > **原创声明**：本项目为原创实现（代码/样式/逻辑手写），仅供个人本地学习研究。
 > 规则采用通用两人跑得快打法；与任何商业棋牌 App 的内部代码无关。
 
+## 监控与数据采集（2026-09-29 起）
+
+- **线上 AI 胜率仪表盘**：`scripts/ai_winrate_report.py`（cron 每 30 分钟）产出
+  `data/winrate_report.{json,md}` — AI 视角胜率 + Wilson 95%CI、规则变体分层、
+  部署窗口切片（`data/deploy_registry.json` 登记每次部署，≥400 局为正式读数）、
+  分人画像（player_id）。运维细节见 `A3_A4_MEASURE_20260929.md`。
+- **匿名玩家指纹 (A3)**：前端 localStorage `pdk_pid` 随对局上报，replay 落盘
+  `player_id` 字段（16 张由 ai_bridge 影子会话落盘、15 张经 `/replays/save`）。
+  纯本地随机值，无个人信息；缺失/非法静默丢弃，不影响开局。
+- 判读口径：AI win = winner != humanSeat；`_prefix E`（external）为 API 调用方对局，
+  不计入真人读数。
+
 ## 快速开始
 
 ```bash
