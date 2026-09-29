@@ -114,6 +114,51 @@ def main():
         rep["overall"][f"{scope}_{deck_name[pref]}"] = {
             "n": n, "ai_win": k, "rate": k / n if n else None,
             "ci95": [lo, hi]}
+
+    # ── A4: 部署窗口切片 (data/deploy_registry.json, 无则跳过) ──
+    deploys = []
+    dr = data / "deploy_registry.json"
+    if dr.exists():
+        try:
+            deploys = sorted(json.loads(dr.read_text(encoding="utf-8"))
+                             .get("deploys", []),
+                             key=lambda d: str(d.get("ts", "")))
+        except Exception as e:                                    # noqa: BLE001
+            rep["deploy_error"] = f"deploy_registry 解析失败: {e}"
+    win_stats = []
+    for i, dep in enumerate(deploys):
+        t0, t1 = str(dep.get("ts", "")), (str(deploys[i + 1]["ts"])
+                                          if i + 1 < len(deploys) else "9999")
+        n = k = 0
+        for g in rows.values():
+            if g.get("_prefix") != "A" or g.get("winner") is None:
+                continue
+            ts = str(g.get("ts", ""))
+            if t0 <= ts < t1:
+                n += 1
+                k += int(g.get("winner") != g.get("humanSeat", 0))
+        lo, hi = wilson(k, n)
+        win_stats.append({"tag": dep.get("tag", "?"), "ts": t0, "n": n,
+                          "ai_win": k, "rate": k / n if n else None,
+                          "ci95": [lo, hi],
+                          "official": n >= 400})
+    if deploys:
+        rep["deploy_windows"] = win_stats
+
+    # ── B4: 分人画像 (player_id 就位后自动生效; A3 部署前为空) ──
+    by_pid = {}
+    for g in rows.values():
+        pid = str(g.get("player_id") or "")
+        if not pid or g.get("_prefix") != "A" or g.get("winner") is None:
+            continue
+        e = by_pid.setdefault(pid, {"n": 0, "ai_win": 0, "first": "", "last": ""})
+        ts = str(g.get("ts", ""))
+        e["n"] += 1
+        e["ai_win"] += int(g.get("winner") != g.get("humanSeat", 0))
+        e["first"] = min(e["first"] or ts, ts)
+        e["last"] = max(e["last"] or ts, ts)
+    rep["players"] = {pid: v for pid, v in
+                      sorted(by_pid.items(), key=lambda kv: -kv[1]["n"])[:50]}
     for lab in sorted(by_variant_all, key=lambda x: -by_variant_all[x][0]):
         n, k = by_variant_all[lab]
         lo, hi = wilson(k, n)
@@ -155,6 +200,24 @@ def main():
     for d in sorted(rep["by_day"], reverse=True):
         s = rep["by_day"][d]
         L.append(f"| {d} | {s['n']} | {pct(s['ai_win'], s['n'])} |")
+    if win_stats:
+        L.append("\n## 部署窗口 (A4: 每次部署后的正式读数, ≥400 局为有效)\n")
+        L.append("| 部署 | 窗口起 | 局数 | AI 胜率 | 正式读数 |")
+        L.append("|---|---|---|---|---|")
+        for s in win_stats:
+            mark = "✅ 正式" if s["official"] else "待满400局(现%d)" % s["n"]
+            L.append("| %s | %s | %d | %s | %s |"
+                     % (s["tag"], s["ts"][:16], s["n"],
+                        pct(s["ai_win"], s["n"]), mark))
+    if rep.get("players"):
+        L.append("\n## 分人画像 (B4, player_id top50)\n")
+        L.append("| player_id | 局数 | AI 胜率 | 首局 | 末局 |")
+        L.append("|---|---|---|---|---|")
+        for pid, e in list(rep["players"].items())[:20]:
+            L.append(f"| {pid[:10]}… | {e['n']} | {pct(e['ai_win'], e['n'])} "
+                     f"| {e['first'][:10]} | {e['last'][:10]} |")
+    else:
+        L.append("\n## 分人画像 (B4)\n\n> player_id 尚无数据（A3 采集 2026-09-29 上线，自上线局起积累）。")
     L.append("\n> 判读纪律: 单日 n<100 的读数 CI ±8pt 以上, 只看趋势; 部署收益验证用"
              " ≥400 局滚动窗口 (≈1pt 分辨)。变体间差异大 (2026-09-29 审查: 主变体 ~45%,"
              " f3 ~77%), 混合口径会互相稀释。")

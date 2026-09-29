@@ -486,6 +486,19 @@ function bridgeEnqueue(fn) {
 function newRid() {
   return 'web-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
 }
+/* A3 匿名玩家指纹（2026-09-29）：本机持久化，随对局上报。分人画像/剥削的数据前提；
+   只在玩家自己的浏览器里生成，不含任何个人信息。 */
+function playerId() {
+  try {
+    let id = localStorage.getItem('pdk_pid');
+    if (!id) {
+      id = 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+      localStorage.setItem('pdk_pid', id);
+    }
+    return id;
+  } catch (e) { return ''; }
+}
+
 async function bridgeApi(path, body, timeoutMs = 15000) {
   const ctl = new AbortController();
   const tm = setTimeout(() => ctl.abort(), timeoutMs);
@@ -666,6 +679,7 @@ async function bridgeNewRound() {
     const doInit = () => bridgeApi('/init', {
       hands: bridge.initHands, kitty: bridge.initKitty,
       leader: S.roundLeader, opts: bridgeOpts(), mode: prodMode(),
+      player_id: playerId(),                            // A3: 匿名玩家指纹
     }, 20000);                                            // 跨海网络放宽到 20s
     // 失败带退避重试（服务重启/网络抖动时不至于整局降级为内置 AI）
     let r = {};
@@ -723,7 +737,7 @@ async function bridgeResync() {
       leader: S.roundLeader, opts: bridgeOpts(),
       mode: bridge.mode === 'dual' ? 'dual' : prodMode(),   // 重连保持本局模式
       no: bridge.no, file: bridge.file, sid: bridge.sid,     // 复用同编号/文件/会话
-
+      player_id: playerId(),                            // A3: 匿名玩家指纹（重同步同 id）
       actions: bridge.actions,
     }, 12000);
     bridge.sid = r.sid || null; bridge.ready = !!r.sid;
@@ -2019,6 +2033,7 @@ async function archive15Round(winner) {
     opts: { ...S.opts }, moves, winner,
     mode: 'pdk45', playMode: S.mode, names: S.names.slice(), engine: 'pdk45',
     durationSec: S.roundStartTs ? Math.round((Date.now() - S.roundStartTs) / 1000) : null,
+    player_id: playerId(),                              // A3: 匿名玩家指纹（15张同样采集）
   };
   const r = await fetch('/replays/save', { method: 'POST',
     headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
