@@ -209,7 +209,13 @@ class Handler(BaseHTTPRequestHandler):
                 if km is None:
                     self.access(f"({hashlib.sha256(key.encode()).hexdigest()[:8]}?)", route, 401, 0)
                     return self._send(401, {"error": "API Key 无效或已吊销"})
-                meta.update({k: v for k, v in km.items() if k not in ("name", "allowed_ips")})
+                if km.get("disabled"):
+                    # 停用（manage_api_keys.py disable）：临时封禁但保留配额配置，可随时 enable 回来
+                    self.access(str(km.get("name") or "(key)"), route, 403, 0)
+                    return self._send(403, {"error": "API Key 已停用（联系服务方启用）"})
+                # name/allowed_ips/disabled 不是配额项，别混进 meta
+                meta.update({k: v for k, v in km.items()
+                             if k not in ("name", "allowed_ips", "disabled")})
                 name = str(km.get("name") or hashlib.sha256(key.encode()).hexdigest()[:8])
                 ips = km.get("allowed_ips") or []
                 if ips and self.client_address[0] not in ips:
