@@ -2667,7 +2667,8 @@ def _restore_sessions_inner() -> int:
         try:
             s = Shadow(d["hands"], d.get("kitty", []), d.get("leader", 0),
                        d.get("opts", {}), d.get("mode", "hybrid"), sid=sid,
-                       reuse_no=d.get("no"), reuse_file=f.name)
+                       reuse_no=d.get("no"), reuse_file=f.name,
+                       player_id=d.get("player_id"))    # 复审1: 恢复路径不丢指纹
             s.restoring = True                       # 重放期间不写盘
             try:
                 for code in d.get("codes", []):
