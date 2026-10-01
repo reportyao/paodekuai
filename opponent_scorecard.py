@@ -68,14 +68,29 @@ def segment_of(t: str, windows) -> str:
     return label
 
 
+ATTR_PATH = os.path.join(BASE, "data", "player_attribution.json")
+
+
+def load_attribution() -> dict:
+    """no -> pid（启发式归属，见 attribute_history.py）。棋谱本体无 player_id 时并入基线。"""
+    try:
+        data = json.load(open(ATTR_PATH, encoding="utf-8"))
+    except Exception:
+        return {}
+    return {str(k): str(v.get("pid")) for k, v in (data.get("attribution") or {}).items()
+            if isinstance(v, dict) and v.get("pid")}
+
+
 def load_games(pid: str | None) -> list[dict]:
+    attr = load_attribution()
     rows = []
     for p in glob.glob(REPLAY_GLOB):
         try:
             d = json.load(open(p, encoding="utf-8"))
         except Exception:
             continue
-        if pid and d.get("player_id") != pid:
+        owner = d.get("player_id") or attr.get(str(d.get("no")))
+        if pid and owner != pid:
             continue
         if d.get("live") or d.get("aborted") or d.get("winner") is None:
             continue
@@ -94,7 +109,8 @@ def load_games(pid: str | None) -> list[dict]:
             "win": int(d["winner"]) == 1,     # True = AI 胜（座位1）
             "d_ai": int(delta[1]),
             "d_hu": int(delta[0]),
-            "pid": d.get("player_id") or "(无指纹)",
+            "pid": owner if owner else "(无归属)",
+            "attr": (not d.get("player_id")) and bool(owner),
         })
     rows.sort(key=lambda x: x["t"])
     return rows
@@ -154,7 +170,7 @@ def main() -> int:
         by = defaultdict(list)
         for r in load_games(None):
             by[r["pid"]].append(r)
-        print("═══ 全部玩家（按有效局数） ═══")
+        print("═══ 全部玩家（含启发式归属，按有效局数） ═══")
         for pid, g in sorted(by.items(), key=lambda kv: -len(kv[1])):
             m = len(g)
             w = sum(1 for x in g if x["win"])
