@@ -1781,6 +1781,117 @@ async function exportAllReplays() {
   } catch { loadReplayArchive(); downloadJSON('paodekuai-local-replays.json', S.replayArchive); }
 }
 
+/* ================= 复盘：一键复制文字版局面 =================
+ * 用途：把「当前这一手」的完整局面（两家手牌 / 底牌 / 规则 / 已走过的手 / 本手动作）
+ *       复制成纯文字，方便贴给别人或 AI 分析、存档、跨设备对照。
+ * 为什么要双通道：站点是 http://（非安全上下文），navigator.clipboard 在多数浏览器
+ *       上不可用（undefined 或直接 reject）⇒ 必须有 execCommand + 文本框兜底，
+ *       否则"一键复制"在手机上大概率静默失败。 */
+function rvCardText2(ids) {
+  return (ids || []).map(id => {
+    const k = botIdCard(id);
+    return RV_SUIT[k.s] + RV_RANK[k.r - 3];
+  }).join(' ');
+}
+/** 生成当前视图这一手的文字版局面 */
+function buildReviewSnapshotText() {
+  const g = RV.game || {};
+  const step = RV.step, total = RV.total;
+  const s = RV.snapshots[step];
+  if (!s) return '';
+  const mv = s.move;
+  const L = [];
+  L.push('【跑得快 · 复盘局面】' + (RV.no ? '  ' + RV.no : ''));
+  L.push('时间：' + (g.timeText || '-') + '   模式：' + (g.mode || '-')
+         + '   进度：第 ' + step + ' / ' + total + ' 手' + (RV.live ? '（进行中）' : ''));
+  if (g.opts) {
+    const o = g.opts;
+    L.push('规则：' + [
+      o.sanzhang ? '三张不可接' : '', o.nobomb ? '炸弹不可拆' : '',
+      o.red10 ? '红桃十翻倍' : '', o.four3 ? '四带三' : '',
+    ].filter(Boolean).join('、') + '（未列=默认规则）');
+  }
+  if (g.leader !== undefined) L.push('先手：' + (RV.names[g.leader] || ('座位' + g.leader)));
+  L.push('');
+  L.push('◆ ' + (RV.names[0] || '座位0') + ' 剩 ' + s.h0.length + ' 张：');
+  L.push('  ' + rvCardText2(s.h0));
+  L.push('◆ ' + (RV.names[1] || '座位1') + ' 剩 ' + s.h1.length + ' 张：');
+  L.push('  ' + rvCardText2(s.h1));
+  if (g.kitty && g.kitty.length) { L.push('◆ 底牌：'); L.push('  ' + rvCardText2(g.kitty)); }
+  if (!mv) {
+    L.push('');
+    L.push('◆ 当前：开局（尚未出牌）');
+  } else {
+    L.push('');
+    L.push('◆ 本手：第' + mv.ply + '手 ' + (RV.names[mv.seat] || ('座位' + mv.seat))
+           + (mv.pass ? ' 过牌' + (mv.pass_on ? '（被过牌型 ' + JSON.stringify(mv.pass_on) + '）' : '') : ''));
+    if (!mv.pass) {
+      const c = mv.combo || {};
+      L.push('  出牌：' + rvCardText2(mv.cards) + (c.ptype !== undefined ? '  [' + (PTT[c.ptype] || '?') + ']' : ''));
+    }
+    if (mv.handAfter !== undefined) L.push('  出后剩 ' + mv.handAfter + ' 张');
+  }
+  // 已走过的手（最多 12 手，太多则省略，避免文本过长无法粘贴）
+  if (step > 0) {
+    L.push('');
+    const from = Math.max(0, step - 12);
+    L.push('◆ 已走过（' + (from ? '略前 ' + from + ' 手，' : '') + '至第 ' + step + ' 手）：');
+    for (let i = from + 1; i <= step; i++) {
+      const m = RV.snapshots[i] && RV.snapshots[i].move;
+      if (!m) continue;
+      L.push('  ' + m.ply + '. ' + (RV.names[m.seat] || ('座位' + m.seat)) + ' '
+             + (m.pass ? '过牌' : rvCardText2(m.cards))
+             + (m.combo && !m.pass ? ' [' + (PTT[m.combo.ptype] || '?') + ']' : ''));
+    }
+  }
+  if (g.result && !RV.live) {
+    const r = g.result;
+    L.push('');
+    L.push('◆ 结果：' + (RV.names[r.winner] || '?') + ' 胜'
+           + (r.rem !== undefined ? '，对手剩 ' + r.rem + ' 张' : '')
+           + (r.shut ? '（关门×2）' : '')
+           + (r.delta ? '，本局分 ' + JSON.stringify(r.delta) : ''));
+  }
+  return L.join('\n');
+}
+/** 双通道复制：navigator.clipboard → execCommand → 文本框兜底 */
+async function copyTextRobust(text) {
+  try {                                   // ① 标准 API（需 https/localhost）
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return 'clipboard';
+    }
+  } catch (e) { /* 落到 ② */ }
+  try {                                   // ② 老 API：http 下依然可用
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, ta.value.length);
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    if (ok) return 'execCommand';
+  } catch (e) { /* 落到 ③ */ }
+  return '';                               // ③ 交给调用方显示文本框
+}
+async function copyReviewSnapshot() {
+  const text = buildReviewSnapshotText();
+  if (!text) { toast('当前没有可复制的局面'); return; }
+  const box = $('rv-copy-text');
+  const how = await copyTextRobust(text);
+  box.value = text;
+  if (how) {
+    box.classList.add('hidden');
+    toast('已复制本手局面（' + text.length + ' 字符）' + (how === 'clipboard' ? '' : '，兼容模式'));
+  } else {
+    box.classList.remove('hidden');       // 兜底：长按/全选手动复制
+    toast('浏览器不支持一键复制，已展开文本框：长按或全选后复制');
+  }
+}
+
 /* ---- 逐手复盘查看器 ---- */
 async function openReview(no, sid, deck) {
   $('rv-move').textContent = '加载中…';
@@ -2476,6 +2587,7 @@ function initLobby() {
   $('rv-last').addEventListener('click', () => { RV.step = RV.total; renderReview(); });
   $('rv-comment-save').addEventListener('click', saveReviewComment);
   $('rv-explain').addEventListener('click', explainCurrentPly);
+  $('rv-copy').addEventListener('click', copyReviewSnapshot);
   $('rv-refresh').addEventListener('click', async () => {
     await openReview(RV.no);
     if (RV.total > 0) { RV.step = RV.total; renderReview(); }

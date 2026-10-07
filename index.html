@@ -288,8 +288,11 @@
       <button id="rv-last" class="btn ghost small">末手 ⏭</button>
       <button id="rv-refresh" class="btn ghost small hidden">🔄 刷新</button>
       <button id="rv-explain" class="btn ghost small explain-btn">🤖 AI 解析这手</button>
+      <button id="rv-copy" class="btn ghost small" title="复制当前这一手的完整局面（手牌/底牌/动作），可直接粘贴发给他人分析">📋 复制局面</button>
     </div>
     <div class="rv-explain hidden" id="rv-explain-box"></div>
+    <textarea id="rv-copy-text" class="rv-copy-text hidden" rows="10" readonly
+              title="若浏览器不支持一键复制，可长按/全选此处手动复制"></textarea>
     <div class="rev-move" id="rv-move"></div>
 
     <div class="rev-hands">

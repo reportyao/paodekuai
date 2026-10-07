@@ -298,6 +298,11 @@ button { font-family: inherit; }
 .rev-cards { font-family: Georgia, serif; color: #ffe9ad; letter-spacing: 1px; }
 .rv-pass { color: #b9c9bb; letter-spacing: 2px; }
 .rev-hands { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+/* 复制局面：一键复制失败时的兜底文本框（http 非安全上下文下 clipboard 可能不可用） */
+.rv-copy-text { width: 100%; box-sizing: border-box; margin-bottom: 10px; padding: 10px 12px;
+  border-radius: 10px; border: 1px solid rgba(247,217,126,.35); background: rgba(0,0,0,.45);
+  color: #e8f0e4; font-size: 12.5px; line-height: 1.65; font-family: ui-monospace, Menlo, Consolas, monospace;
+  resize: vertical; -webkit-user-select: text; user-select: text; }
 .rev-hand-block { background: rgba(0,0,0,.22); border-radius: 10px; padding: 7px 9px; min-height: 74px; }
 .rev-hand-title { font-size: 12px; color: #f7d97e; margin-bottom: 6px; font-weight: 700; }
 .rev-hand { display: flex; flex-wrap: wrap; gap: 3px; }
