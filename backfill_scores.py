@@ -158,10 +158,12 @@ def main() -> int:
             doc["scores"] = new_delta
             tmp = p.with_suffix(".json.tmp")
             try:
-                tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=1), encoding="utf-8")
+                # indent=2 必须与桥写盘（write_replay / save_replay）一致：
+                # 早先误用 indent=1 导致回填过的文件与全库格式不统一（纯观感问题，
+                # 但会让后续 git diff / 人工查阅变脏）。normalize_json_format.py 可单独修正。
+                tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
                 os.replace(tmp, p)
-                # 回读校验
-                back = json.loads(p.read_text(encoding="utf-8"))
+                back = json.loads(p.read_text(encoding="utf-8"))   # 回读校验
                 if list((back.get("result") or {}).get("delta") or []) != new_delta:
                     errors.append((p.name, "回读校验不一致"))
             except Exception as e:
