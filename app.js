@@ -5,7 +5,7 @@ const $ = (id) => document.getElementById(id);
 const SUITS = ['♠', '♥', '♣', '♦'];            // 红: s===1 || s===3
 const RANK_NAME = { 3:'3',4:'4',5:'5',6:'6',7:'7',8:'8',9:'9',10:'10',11:'J',12:'Q',13:'K',14:'A',15:'2' };
 const BASE = 1;          // 底分：1分/张
-const BOMB_SCORE = 10;   // 每颗未被压掉的炸弹：输家多付 10 分给赢家（不论谁炸的）
+const BOMB_SCORE = 10;   // 每颗未被压掉的炸弹：归打出它的一方 +10（不扣对方）
 
 /* ================= 状态 ================= */
 const S = {
@@ -1518,7 +1518,7 @@ function applyPlay(seat, cards) {
       }
     }
     S.bombs.push({ by: seat, beaten: false });
-    msg = '💣 炸弹！结算时输家多付 ' + BOMB_SCORE + ' 分';
+    msg = '💣 炸弹！结算时给你 ' + BOMB_SCORE + ' 分（不扣对方）';
   }
   S.selected = new Set(); S.hints = []; S.hintIdx = -1;
   S.roundMoves.push({ seat, cards: cards.map(c => c.i), combo: { ...combo }, ts: Date.now() });
@@ -2118,16 +2118,23 @@ function settle(winner) {
   const surv = S.bombs.filter(b => !b.beaten);
   const bw = surv.filter(b => b.by === winner).length;
   const bl = surv.filter(b => b.by === loser).length;
-  // 炸弹分由输家承担：每颗未被压掉的炸弹，输家多付 BOMB_SCORE 给赢家（不论谁炸的）
-  // —— 2026-09-24 用户拍板；旧口径"炸弹持有者向被炸方收 10 分（与胜负无关）"已废
-  let dW = base + BOMB_SCORE * (bw + bl);
-  let dL = -dW, redTxt = '';
+  // 炸弹：每颗未被压掉的炸弹，让打出它的那一方 +10，**不扣对方**（不论输赢）
+  // ⇒ 输家炸得够多时，输了净分仍可能为正（剩3张+1炸 = −3+10 = +7）
+  // 2026-10-01 用户拍板；旧口径（持有者向被炸方收 / 炸弹一律由输家承担）均已废
+  let sc = [0, 0];
+  sc[winner] += base; sc[loser] -= base;
+  sc[winner] += BOMB_SCORE * bw; sc[loser] += BOMB_SCORE * bl;
+  let redTxt = '';
   if (S.opts.red10 && S.red10Holder != null) {
-    if (S.red10Holder === winner) { dW *= 2; dL = -dW; redTxt = S.names[winner] + '持有红桃十，翻倍'; }
-    else { dL *= 2; dW = -dL; redTxt = S.names[loser] + '持有红桃十，翻倍'; }
+    sc[S.red10Holder] *= 2;                        // 持有者本人净分 ×2（不再强制对手取反）
+    redTxt = S.names[S.red10Holder] + '持有红桃十，翻倍';
   }
+  const dW = sc[winner], dL = sc[loser];
+  // 输了却因炸弹净正：明确告知，避免"赢了怎么还输分"的困惑
+  const upsetNote = (loser === 0 && dL > 0) || (loser === 1 && dW > 0)
+    ? '（' + S.names[loser] + '虽败，但炸弹加分后净分仍为正）' : '';
   S.total[winner] += dW; S.total[loser] += dL;
-  return { winner, loser, rem, shut, base, bw, bl, dW, dL, redTxt };
+  return { winner, loser, rem, shut, base, bw, bl, dW, dL, redTxt, upsetNote };
 }
 /* 15张（pdk45）对局上传存档：服务端权威结算 + B 编号（与 16 张 A/H/E 物理隔离）。
  * 失败不影响本地结算与展示（本地存档照旧），但会提示"未存档到服务器"。 */
@@ -2192,10 +2199,13 @@ function showRoundModal(r) {
   lines.push(`<div class="res-line"><span class="k">底分</span><span class="v">${S.names[r.loser]}剩 ${r.rem} 张 × ${BASE}分` +
     (r.rem === 1 ? '（仅剩1张，不计分）' : '') + (r.shut ? '，<b>关门！失分×2</b>' : '') + ` = <b class="num">${r.base}</b> 分</span></div>`);
   if (r.bw + r.bl > 0) {
-    lines.push(`<div class="res-line"><span class="k">炸弹</span><span class="v">${S.names[r.winner]} ${r.bw} 颗、${S.names[r.loser]} ${r.bl} 颗（每颗 ${BOMB_SCORE} 分由输家付，被压掉的不计）</span></div>`);
+    lines.push(`<div class="res-line"><span class="k">炸弹</span><span class="v">${S.names[r.winner]} ${r.bw} 颗、${S.names[r.loser]} ${r.bl} 颗（每颗 ${BOMB_SCORE} 分归<b>打出它的一方</b>，不扣对方；被压掉的不计）</span></div>`);
   }
-  if (r.redTxt) lines.push(`<div class="res-line"><span class="k">红桃十</span><span class="v">${r.redTxt}（输赢×2）</span></div>`);
-  lines.push(`<div class="res-line hl"><span class="k">本局得分</span><span class="v">${S.names[w]} <b class="num pos">+${r.dW}</b> ｜ ${S.names[r.loser]} <b class="num neg">${r.dL}</b></span></div>`);
+  if (r.redTxt) lines.push(`<div class="res-line"><span class="k">红桃十</span><span class="v">${r.redTxt}（本人净分×2）</span></div>`);
+  // 非零和：赢家不一定 +、输家不一定 −，颜色必须按各自真实正负（旧的硬编码 pos/neg 会显示反）
+  const sg = v => `<b class="num ${v > 0 ? 'pos' : v < 0 ? 'neg' : ''}">${v > 0 ? '+' : ''}${v}</b>`;
+  lines.push(`<div class="res-line hl"><span class="k">本局得分</span><span class="v">${S.names[w]} ${sg(r.dW)} ｜ ${S.names[r.loser]} ${sg(r.dL)}</span></div>`);
+  if (r.upsetNote) lines.push(`<div class="res-line"><span class="k dim">说明</span><span class="v dim">${r.upsetNote}</span></div>`);
   lines.push(`<div class="res-line"><span class="k">累计</span><span class="v">${S.names[0]} <b>${S.total[0]}</b> : <b>${S.total[1]}</b> ${S.names[1]}（第 ${S.roundNo}/${S.rounds} 局）</span></div>`);
   $('m-list').innerHTML = lines.join('');
   const last = S.roundNo >= S.rounds;

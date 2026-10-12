@@ -4,20 +4,26 @@
 **唯一实现处**：ai_bridge.compute_result / replay_report.save_game15 / online_server 都调它，
 网页版 app.js settle() 与之逐条对齐（改口径必须两边一起改）。
 
-规则（与 app.js settle() 逐条对齐）：
+规则（2026-10-01 用户拍板，与 app.js settle() 逐条对齐）：
 - 底分 = 输家剩余张数（剩 1 张不计分）；
 - 关门（输家一手未出）失分 ×2；
-- **炸弹分由输家承担**：每颗未被压掉的炸弹，输家多付 BOMB_SCORE 分给赢家（不论谁炸的；
-  后手用更大炸弹**直接**压掉才不算，隔了过牌重新领出不算压）。
-  —— 2026-09-24 用户拍板：旧口径"炸弹持有者向被炸方收 10 分（与胜负无关）"会让输家
-  自己的炸弹把底分抵成 0（A1737：AI 胜、人类剩 10 张、人类有一颗未压炸弹 → 0 分），已废。
-  只影响新局；历史棋谱保留当时算出的分数（用户决定不回填）。
-- 红桃十翻倍（opts.red10：♥10 持有者所在一方输赢 ×2，随后锁定）；
-- 选项开关按传入 opts 解释（sanzhang/four3 不影响计分）。
+- **炸弹：每颗未被压掉的炸弹，让"打出它的那一方" +10 分，不扣对方**（不论输赢）。
+  后手用更大炸弹**直接**压掉才不计分；隔了过牌重新领出仍算未被压掉。
+  ⚠ 与旧口径的差别（这正是 09-24/09-25 两次误判的根源）：
+    - 最旧口径「炸弹持有者向被炸方收 10」= 零和（输家炸了反而倒扣）；
+    - 09-24 中途口径「炸弹一律由输家承担」= 输家炸了更亏；
+    - **现行：只给持有者加分** ⇒ 输家炸得够多时，**输了净分仍可能为正**（例：剩 3 张=底分 3，
+      1 颗炸弹 ⇒ −3+10 = **+7**）。分数**不再零和**，双方都可能为正。
+- 红桃十翻倍（opts.red10）：♥10 持有者**本人的本局净分** ×2（可正可负）。
+
+影响面（口径非零和后必须一起看）：
+- 累计分/排行榜/仪表盘的"净分差"不再是两人互为相反数，读数按各人自己的净值看；
+- 引擎侧 `pdk/engine.py::_settle` 仍是"炸弹持有者向被炸方收"的旧口径（引擎线领地），
+  H5 展示与 AI 内部目标函数因此不一致，见 [[pdk-ai-deploy-path]]。
 """
 
 HEART_10 = 29                       # ♥10 的牌 id（rankIdx 7 × 4 + suit 1）
-BOMB_SCORE = 10                     # 每颗未被压掉的炸弹的分数（由输家付给赢家）
+BOMB_SCORE = 10                     # 每颗未被压掉的炸弹：持有者得分（不扣对方）
 
 
 def compute_result(hands, moves, opts, winner) -> dict:
@@ -25,6 +31,8 @@ def compute_result(hands, moves, opts, winner) -> dict:
 
     hands: [[座位0初始手牌id], [座位1初始手牌id]]；moves: 逐手明细
     （[{seat, cards:[id], pass}]，combo 仅用于识别炸弹 ptype==8）。
+
+    delta = [座位0净分, 座位1净分]（**不保证互为相反数**：炸弹分只加给持有者）。
     """
     winner = int(winner)
     loser = 1 - winner
@@ -56,23 +64,22 @@ def compute_result(hands, moves, opts, winner) -> dict:
     surv = [b for b in bombs if not b["beaten"]]
     bw = sum(1 for b in surv if b["by"] == winner)
     bl = len(surv) - bw
-    # 每颗未被压掉的炸弹：输家多付给赢家（与"谁炸的"无关）
-    dW = base + BOMB_SCORE * (bw + bl)
-    dL = -dW
+
+    # 底分仍是零和（赢家 +base / 输家 −base）；炸弹分**只加给持有者**，不扣对方。
+    score = [0, 0]
+    score[winner] += base
+    score[loser] -= base
+    score[winner] += BOMB_SCORE * bw
+    score[loser] += BOMB_SCORE * bl
+
     red_txt = ""
     if opts.get("red10"):
         holder = next((s for s in (0, 1) if HEART_10 in (hands[s] or [])), None)
         if holder is not None:
             who = "你" if holder == 0 else "AI"
-            if holder == winner:
-                dW *= 2
-                dL = -dW
-            else:
-                dL *= 2
-                dW = -dL
+            score[holder] *= 2                        # 持有者本人净分 ×2（不再强制对手取反）
             red_txt = f"{who} 持有红桃十，翻倍"
-    delta = [0, 0]
-    delta[winner] = dW
-    delta[loser] = dL
+
+    delta = [int(score[0]), int(score[1])]
     return {"winner": winner, "loser": loser, "rem": rem, "shut": bool(shut),
             "base": base, "bombs": [bw, bl], "redTxt": red_txt, "delta": delta}
