@@ -4,22 +4,19 @@
 **唯一实现处**：ai_bridge.compute_result / replay_report.save_game15 / online_server 都调它，
 网页版 app.js settle() 与之逐条对齐（改口径必须两边一起改）。
 
-规则（2026-10-01 用户拍板，与 app.js settle() 逐条对齐）：
+规则（2026-10-12 定稿，与 app.js settle() 逐条对齐）：
 - 底分 = 输家剩余张数（剩 1 张不计分）；
 - 关门（输家一手未出）失分 ×2；
 - **炸弹：每颗未被压掉的炸弹，让"打出它的那一方" +10 分，不扣对方**（不论输赢）。
   后手用更大炸弹**直接**压掉才不计分；隔了过牌重新领出仍算未被压掉。
-  ⚠ 与旧口径的差别（这正是 09-24/09-25 两次误判的根源）：
-    - 最旧口径「炸弹持有者向被炸方收 10」= 零和（输家炸了反而倒扣）；
-    - 09-24 中途口径「炸弹一律由输家承担」= 输家炸了更亏；
-    - **现行：只给持有者加分** ⇒ 输家炸得够多时，**输了净分仍可能为正**（例：剩 3 张=底分 3，
-      1 颗炸弹 ⇒ −3+10 = **+7**）。分数**不再零和**，双方都可能为正。
-- 红桃十翻倍（opts.red10）：♥10 持有者**本人的本局净分** ×2（可正可负）。
-
-影响面（口径非零和后必须一起看）：
-- 累计分/排行榜/仪表盘的"净分差"不再是两人互为相反数，读数按各人自己的净值看；
-- 引擎侧 `pdk/engine.py::_settle` 仍是"炸弹持有者向被炸方收"的旧口径（引擎线领地），
-  H5 展示与 AI 内部目标函数因此不一致，见 [[pdk-ai-deploy-path]]。
+  ⇒ 输家炸得够多时，**输了净分仍可能为正**（例：剩 3 张=底分 3，1 颗炸弹 ⇒ −3+10 = **+7**）。
+- **红桃十翻倍（opts.red10）**：♥10 被某个玩家持有时，**底分转移 ×2**（赢家 +2×底分、
+  输家 −2×底分，**输赢都翻**、双方关联）；♥10 被扣进底牌 = 无人持有 ⇒ 不翻。
+  **炸弹分不参与翻倍**（永远各 +10）。
+- ⚠ 分数**仍是非零和**（炸弹分只加给持有者）：sum(delta) = 10×未压炸弹总数（恒等式
+  无条件成立——底分转移恒零和、炸弹恒为外加项）。读排行榜/看板按各人自己的净值看。
+- 引擎侧 `pdk/engine.py::_settle` 仍是旧口径（炸弹零和 + 红十对手取反），与 H5 不一致，
+  对齐需引擎线改 C 核心，见 [[pdk-ai-deploy-path]]。
 """
 
 HEART_10 = 29                       # ♥10 的牌 id（rankIdx 7 × 4 + suit 1）
@@ -65,20 +62,24 @@ def compute_result(hands, moves, opts, winner) -> dict:
     bw = sum(1 for b in surv if b["by"] == winner)
     bl = len(surv) - bw
 
-    # 底分仍是零和（赢家 +base / 输家 −base）；炸弹分**只加给持有者**，不扣对方。
-    score = [0, 0]
-    score[winner] += base
-    score[loser] -= base
-    score[winner] += BOMB_SCORE * bw
-    score[loser] += BOMB_SCORE * bl
-
+    # 底分转移（零和）：赢家 +base / 输家 −base。红十翻倍翻在**这笔转移**上——
+    # 赢家翻倍赢的分就是输家付的分（关联），所以双方同时 ×2。
+    # 触发条件：opts.red10 且 ♥10 真的被某个玩家持有（被扣进底牌 = 无人持有，不翻）；
+    # **输赢都翻**（2026-10-12 用户拍板，传统规则：红十是风险与收益并存）。
+    # 炸弹分在转移之外：各 +10 归打出者，不扣对方、**不参与翻倍**。
+    mult = 1
     red_txt = ""
     if opts.get("red10"):
         holder = next((s for s in (0, 1) if HEART_10 in (hands[s] or [])), None)
         if holder is not None:
+            mult = 2
             who = "你" if holder == 0 else "AI"
-            score[holder] *= 2                        # 持有者本人净分 ×2（不再强制对手取反）
             red_txt = f"{who} 持有红桃十，翻倍"
+    score = [0, 0]
+    score[winner] += base * mult
+    score[loser] -= base * mult
+    score[winner] += BOMB_SCORE * bw
+    score[loser] += BOMB_SCORE * bl
 
     delta = [int(score[0]), int(score[1])]
     return {"winner": winner, "loser": loser, "rem": rem, "shut": bool(shut),

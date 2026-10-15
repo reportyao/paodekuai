@@ -71,11 +71,8 @@ r5 = settle.compute_result([[i for i in range(16)], [i for i in range(16, 32)]],
 assert r5["bombs"] == [1, 0], r5
 print(f"5) 炸弹互压: bombs={r5['bombs']}（先出那颗被压掉不计）delta={r5['delta']}")
 
-# --- 6) 红桃十翻倍：持有者本人净分 ×2（可正可负，不强制对手取反）
-# --- 6) 红桃十翻倍：持有者本人净分 ×2（可正可负，不强制对手取反）
-#        人类(座位0)持 ♥10(29)、打出 1 颗未压炸弹且只剩 3 张 ⇒ 净分 -3+10 = **+7**
-#        （A1737 里 ♥10 也在人类手上，但那张底分=10 与炸弹 +10 抵消成 0，翻倍看不出效果，
-#          故这里造一个净分非零的场景，才能真正验证"翻倍"）
+# --- 6) 红十翻倍：底分转移 ×2（输赢都翻、双方关联）；♥10 在底牌则不翻
+#        场景：人类(座位0)持 ♥10(29)、打出 1 颗未压炸弹且只剩 3 张
 h0 = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 29]
 h1 = list(range(16, 32))
 assert settle.HEART_10 in h0
@@ -88,13 +85,30 @@ m6 = [B(0, [0, 1, 2, 3], 8),      # 炸弹（rank0 四张）
 plain = settle.compute_result([h0, h1], m6, {}, 1)
 r6 = settle.compute_result([h0, h1], m6, {"red10": True}, 1)
 assert (plain["rem"], plain["bombs"]) == (3, [0, 1]), plain   # bombs=[赢家,输家]：人类是输家
-assert plain["delta"] == [7, 3], plain                       # 无翻倍：+7 / +3
+assert plain["delta"] == [7, 3], plain                       # 无翻倍：-3+10=+7 / +3
 assert r6["redTxt"], r6
-assert r6["delta"][0] == 2 * plain["delta"][0], (r6["delta"], plain["delta"])   # 7 → 14
-assert r6["delta"][1] == plain["delta"][1], (r6["delta"], plain["delta"])       # 对方不受影响
-print(f"6) 红十翻倍: 无翻倍={plain['delta']} → 翻倍后={r6['delta']}"
-      f"（人类 {plain['delta'][0]}→{r6['delta'][0]} ×2，AI 不变）  ✅")
+# 输赢都翻：人类是输家 ⇒ 底分转移 ×2 ⇒ 人类 -6+10=+4，AI +6（关联：AI 的 +6 就是人类付的 6）
+assert r6["delta"] == [4, 6], r6
+assert r6["delta"][1] == 2 * plain["delta"][1], (r6["delta"], plain["delta"])   # AI 侧 ×2
+assert r6["delta"][0] == -2 * plain["base"] + 10, r6                            # 人类 -2×3+10
+print(f"6) 红十翻倍(输赢都翻): 无翻倍={plain['delta']} → 翻倍后={r6['delta']}"
+      f"（底分转移×2，双方关联）  ✅")
+
+# --- 7) ♥10 被扣进底牌：无人持有 ⇒ 不翻倍（settle 只按 hands 判 holder）
+k0 = [x for x in h0 if x != 29] + [16]     # 仍是 16 张、不含 29
+k1 = [x for x in h1 if x != 29] + [17]
+assert settle.HEART_10 not in k0 and settle.HEART_10 not in k1
+r7 = settle.compute_result([k0, k1], m6, {"red10": True}, 1)
+assert r7["delta"] == plain["delta"], (r7["delta"], plain["delta"])   # 与无红十完全一致
+assert not r7["redTxt"], r7
+print(f"7) ♥10 在底牌: delta={r7['delta']}（不翻倍，redTxt 空）  ✅")
+
+# --- 8) 恒等式现在无条件成立：sum(delta) == 10×未压炸弹数（红十局也成立）
+for opts in ({}, {"red10": True}):
+    rr = settle.compute_result([h0, h1], m6, opts, 1)
+    assert rr["delta"][0] + rr["delta"][1] == 10 * sum(rr["bombs"]), (opts, rr)
+print(f"8) 恒等式无条件成立（含红十局）: sum == 10×炸弹  ✅")
 
 print("\n全部断言通过 ✅")
-print(f"现行公式： 底分 零和(赢家+base/输家-base) + 炸弹 各+{settle.BOMB_SCORE}×自身未压炸弹数"
-      f"（不扣对方）⇒ 合计 = 10×总炸弹数（非零和）")
+print(f"现行公式： 底分转移 m×base（红十被持有时 m=2，输赢都翻、双方关联）"
+      f"+ 炸弹 各+10×自身未压炸弹数（不扣对方、不参与翻倍）⇒ 恒等式 sum==10×炸弹 无条件成立")

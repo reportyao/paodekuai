@@ -2118,17 +2118,15 @@ function settle(winner) {
   const surv = S.bombs.filter(b => !b.beaten);
   const bw = surv.filter(b => b.by === winner).length;
   const bl = surv.filter(b => b.by === loser).length;
-  // 炸弹：每颗未被压掉的炸弹，让打出它的那一方 +10，**不扣对方**（不论输赢）
+  // 炸弹：每颗未被压掉的炸弹，让打出它的那一方 +10，**不扣对方**（不论输赢、不参与红十翻倍）
   // ⇒ 输家炸得够多时，输了净分仍可能为正（剩3张+1炸 = −3+10 = +7）
-  // 2026-10-01 用户拍板；旧口径（持有者向被炸方收 / 炸弹一律由输家承担）均已废
+  // 底分转移（零和）：红十翻倍翻在**这笔转移**上——赢家翻倍赢的分就是输家付的分（关联）；
+  // 触发：opts.red10 且 ♥10 真被某方持有（在底牌=无人持有，不翻）；输赢都翻（2026-10-12 拍板）
+  const mult = (S.opts.red10 && S.red10Holder != null) ? 2 : 1;
   let sc = [0, 0];
-  sc[winner] += base; sc[loser] -= base;
+  sc[winner] += base * mult; sc[loser] -= base * mult;
   sc[winner] += BOMB_SCORE * bw; sc[loser] += BOMB_SCORE * bl;
-  let redTxt = '';
-  if (S.opts.red10 && S.red10Holder != null) {
-    sc[S.red10Holder] *= 2;                        // 持有者本人净分 ×2（不再强制对手取反）
-    redTxt = S.names[S.red10Holder] + '持有红桃十，翻倍';
-  }
+  const redTxt = (mult === 2) ? (S.names[S.red10Holder] + '持有红桃十，翻倍') : '';
   const dW = sc[winner], dL = sc[loser];
   // 输了却因炸弹净正：明确告知，避免"赢了怎么还输分"的困惑
   const upsetNote = (loser === 0 && dL > 0) || (loser === 1 && dW > 0)
@@ -2201,7 +2199,7 @@ function showRoundModal(r) {
   if (r.bw + r.bl > 0) {
     lines.push(`<div class="res-line"><span class="k">炸弹</span><span class="v">${S.names[r.winner]} ${r.bw} 颗、${S.names[r.loser]} ${r.bl} 颗（每颗 ${BOMB_SCORE} 分归<b>打出它的一方</b>，不扣对方；被压掉的不计）</span></div>`);
   }
-  if (r.redTxt) lines.push(`<div class="res-line"><span class="k">红桃十</span><span class="v">${r.redTxt}（本人净分×2）</span></div>`);
+  if (r.redTxt) lines.push(`<div class="res-line"><span class="k">红桃十</span><span class="v">${r.redTxt}（底分×2，输赢都翻）</span></div>`);
   // 非零和：赢家不一定 +、输家不一定 −，颜色必须按各自真实正负（旧的硬编码 pos/neg 会显示反）
   const sg = v => `<b class="num ${v > 0 ? 'pos' : v < 0 ? 'neg' : ''}">${v > 0 ? '+' : ''}${v}</b>`;
   lines.push(`<div class="res-line hl"><span class="k">本局得分</span><span class="v">${S.names[w]} ${sg(r.dW)} ｜ ${S.names[r.loser]} ${sg(r.dL)}</span></div>`);
